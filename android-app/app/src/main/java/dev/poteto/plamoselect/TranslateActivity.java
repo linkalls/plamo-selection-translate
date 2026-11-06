@@ -449,7 +449,7 @@ public class TranslateActivity extends Activity {
             translatedCard.addView(targetText, fillWrap());
         } else {
             // Inner scrolling keeps copy/share/speak/replace reachable even
-            // when translating a long fictional article or an entire paragraph.
+            // when translating a long document or an entire paragraph.
             resultScroller = new PriorityScrollView(this);
             resultScroller.setFillViewport(false);
             resultScroller.setVerticalScrollBarEnabled(true);
