@@ -37,7 +37,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sdkmanager "platforms;android-36" "build-tools;36.0.0"
+          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          sdkmanager_bin="$ANDROID_HOME/cmdline-tools/16.0/bin/sdkmanager"
+          if [[ ! -x "$sdkmanager_bin" ]]; then
+            sdkmanager_bin="$(find "$ANDROID_HOME/cmdline-tools" -maxdepth 3 -type f -name sdkmanager | sort -V | tail -1)"
+          fi
+          test -x "$sdkmanager_bin"
+          yes | "$sdkmanager_bin" "platforms;android-36" "build-tools;36.0.0" || test "${PIPESTATUS[1]}" -eq 0
 
       - name: Configure Gradle 9.3.1
         uses: gradle/actions/setup-gradle@v4
