@@ -144,12 +144,15 @@ public final class SettingsActivity extends Activity {
                 new int[]{256, 512, 1024, 1536}, 512, false);
 
         addSection("翻訳");
-        addDescription("長文のぶつ切り対策：文単位で順番に翻訳する。"
-                + "段落や見出しが途中で終わっても残りを続ける。");
-        addChoice("1回の翻訳単位の最大文字数", "chunk_chars",
-                new String[]{"160文字（短文重視）", "220文字（標準）",
-                        "360文字（長文優先）"},
-                new int[]{160, 220, 360}, 220, false);
+        addDescription("段落単位で意味を保ち、記事の前後の文脈と翻訳履歴を"
+                + "渡して処理する。長すぎる段落だけ分割する。");
+        addChoice("長い段落の分割上限", "chunk_chars",
+                new String[]{"360文字（省メモリ）", "420文字（標準）",
+                        "600文字（文脈重視）"},
+                new int[]{360, 420, 600}, 420, false);
+        addSwitch("段落間の文脈を保持",
+                "前後の記事と過去の対訳を参考情報として渡す",
+                "translation_context", true);
         addSwitch("入力した文章を自動翻訳",
                 "入力停止後に自動で翻訳する", "auto_translate", true);
 

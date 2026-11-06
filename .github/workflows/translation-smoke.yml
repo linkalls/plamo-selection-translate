@@ -57,11 +57,12 @@ jobs:
           java -cp "$RUNNER_TEMP/plamo-smoke/classes" \
             TranslationSegmentsTest | tee "$RUNNER_TEMP/plamo-smoke/segments.txt"
 
-      - name: Translate both directions and the full fictional sample
+      - name: Translate both directions and the fictional context scenario
         shell: bash
         run: |
           set -euo pipefail
-          python3 scripts/smoke_pfml3.py "$RUNNER_TEMP/plamo-smoke/segments.txt"
+          python3 scripts/smoke_pfml3.py
+          python3 scripts/smoke_context.py "$RUNNER_TEMP/plamo-smoke/segments.txt"
 
       - name: Show model server logs on error
         if: failure()

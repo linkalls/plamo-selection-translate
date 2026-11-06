@@ -1035,8 +1035,11 @@ public class TranslateActivity extends Activity {
                 translationPort = port;
                 if (isStale(request)) return;
                 int maxChars = getSharedPreferences("plamo_prefs", MODE_PRIVATE)
-                        .getInt("chunk_chars", 220);
+                        .getInt("chunk_chars", 420);
                 final List<String> chunks = TranslationSegments.split(original, maxChars);
+                final boolean preserveContext = getSharedPreferences("plamo_prefs", MODE_PRIVATE)
+                        .getBoolean("translation_context", true);
+                final List<PLaMoPrompt.Pair> history = new ArrayList<>();
                 if (chunks.isEmpty()) {
                     throw new IOException("翻訳できる文章が見つからない");
                 }
@@ -1054,8 +1057,12 @@ public class TranslateActivity extends Activity {
                     // a slow phone the user sees translation immediately after
                     // the first generated token instead of waiting for all.
                     final String completedChunks = translated.toString();
+                    String context = preserveContext
+                            ? TranslationSegments.surroundingContext(original, chunks, i, 900)
+                            : "";
                     String result = callLocalTranslate(chunks.get(i), destination,
-                            modelGeneration, capturedDirectionMode, maxTokens, partial -> {
+                            modelGeneration, capturedDirectionMode, maxTokens,
+                            context, preserveContext ? history : null, partial -> {
                                 if (isStale(request)) return;
                                 final String visible = completedChunks
                                         + (completedChunks.isEmpty() ? "" : "\n\n")
@@ -1075,6 +1082,9 @@ public class TranslateActivity extends Activity {
                     if (isStale(request)) return;
                     if (translated.length() > 0) translated.append("\n\n");
                     translated.append(result.trim());
+                    if (preserveContext) {
+                        history.add(new PLaMoPrompt.Pair(chunks.get(i), result.trim()));
+                    }
                     final String preview = translated.toString();
                     mainHandler.post(() -> {
                         if (!isStale(request)) {
@@ -1154,6 +1164,7 @@ public class TranslateActivity extends Activity {
      */
     private String callLocalTranslate(String source, String destination,
             int modelGeneration, int sourceDirection, int maxTokens,
+            String context, List<PLaMoPrompt.Pair> history,
             java.util.function.Consumer<String> onPartial) throws Exception {
         boolean isPlamo3 = modelGeneration == 3;
         HttpURLConnection connection = (HttpURLConnection) new URL(
@@ -1183,23 +1194,14 @@ public class TranslateActivity extends Activity {
             if (isPlamo3) {
                 // The official model card explicitly recommends direct PFML3
                 // for production instead of chat_template_kwargs.
-                StringBuilder prompt = new StringBuilder();
-                prompt.append("<|plamo:tag|>dataset<|plamo:msg|>translation");
-                prompt.append("<|plamo:tag|>input");
-                if (sourceDirection != 0) {
-                    // The source language is optional, but accurate when
-                    // explicitly selected; auto mode detects from the text.
-                    prompt.append("<|plamo:key|>lang<|plamo:val|>")
-                            .append(destination.equals("ja") ? "en" : "ja");
-                }
-                prompt.append("<|plamo:msg|>");
-                prompt.append(source);
-                prompt.append("<|plamo:tag|>output");
-                prompt.append("<|plamo:key|>lang<|plamo:val|>")
-                        .append(destination);
-                prompt.append("<|plamo:msg|>");
-
-                request.put("prompt", prompt.toString());
+                // PFN-documented PFML3: the current *paragraph* is the input,
+                // while the whole article and earlier source/translation pairs
+                // are passed separately for coreference and continuity.
+                String sourceLanguage = sourceDirection == 0 ? null
+                        : (destination.equals("ja") ? "en" : "ja");
+                String prompt = PLaMoPrompt.build(source, destination,
+                        sourceLanguage, context, history);
+                request.put("prompt", prompt);
                 request.put("n_predict", maxTokens);
                 request.put("cache_prompt", false);
                 // llama.cpp inserts the BOS token; do not add it here.
