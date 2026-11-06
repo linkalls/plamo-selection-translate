@@ -273,6 +273,10 @@ public final class ModelService extends Service {
         command.add(executable.getAbsolutePath());
         command.add("-m");
         command.add(getModelFile().getAbsolutePath());
+        // Keep the model identifier stable across arbitrary imported GGUF names.
+        // The chat-completions request uses model="plamo".
+        command.add("--alias");
+        command.add("plamo");
         command.add("--host");
         command.add("127.0.0.1");
         command.add("--port");
