@@ -30,7 +30,7 @@ runtime. Neither the Google Translate app nor Gboard needs to be modified.
 
 ## First run / PLaMo models
 
-1. Download **PLaMo-Select-v0.3.0-release.apk** from [Releases](../../releases)
+1. Download **PLaMo-Select-v0.4.0-release.apk** from [Releases](../../releases)
    and install it.
 2. On first launch, choose **Download** to fetch PFN's PLaMo 3 Translate 0.8B
    Q4_K_M GGUF (~570 MB), or select an existing GGUF with the file picker.
@@ -43,11 +43,19 @@ Hugging Face repository. It is not included in the APK, and is subject to the
 The default 0.8B GGUF is suitable for testing on modern Android phones; actual
 performance, memory consumption and compatibility are device dependent.
 
-Under settings, select PLaMo 3 for a GGUF with the newer embedded Jinja chat
-template and chat_template_kwargs target_lang settings. PLaMo 2's older
+For PLaMo 3 the app uses the PFN-recommended PFML3 prompt and llama.cpp
+/completion API. This reliably encodes the target language inside the prompt,
+independently of GGUF chat template support. PLaMo 2's older
 JA:/EN: prompt mode remains available for legacy GGUF files. Importing a
 file whose original name contains "plamo-2" selects legacy mode automatically.
-For PLaMo 3, the native server is launched with --jinja.
+The selection popup is **result first**; translation output scrolls within
+a bounded result card, and long original text lives in a short internally
+scrollable input below it. A 466-character selection no longer obscures the
+translation or copy/share actions.
+
+PLaMo 3's model also supports an embedded Jinja chat template, but the direct
+/completion path is used to avoid subtle template / options compatibility
+issues. The native server remains configured with --jinja.
 
 ## Android build
 

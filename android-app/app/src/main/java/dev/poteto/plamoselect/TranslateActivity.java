@@ -202,11 +202,12 @@ public class TranslateActivity extends Activity {
         } else {
             int width = getResources().getDisplayMetrics().widthPixels;
             int height = getResources().getDisplayMetrics().heightPixels;
-            window.setGravity(Gravity.CENTER);
+            window.setGravity(Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
             window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
-            window.setDimAmount(0.35f);
-            window.setLayout(Math.min(dp(440), width - dp(24)),
-                    Math.min(dp(625), (int) (height * 0.82f)));
+            window.setDimAmount(0.30f);
+            // Keep the source app clearly visible, even on smaller screens.
+            window.setLayout(Math.min(dp(460), width - dp(12)),
+                    Math.min(dp(610), (int) (height * 0.72f)));
             window.setSoftInputMode(
                     WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
                     | WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
@@ -248,9 +249,18 @@ public class TranslateActivity extends Activity {
 
         buildHeader(shell);
         buildLanguageSelector(shell);
-        buildSourceCard(shell);
-        buildTranslationCard(shell);
-        buildFooter(shell);
+        if (isHomeScreen()) {
+            // Main app: input-first, standard translation editor.
+            buildSourceCard(shell);
+            buildTranslationCard(shell);
+            buildFooter(shell);
+        } else {
+            // Selection popup: result-first, compact and immediately useful.
+            // The source remains editable below; it must not hide the result.
+            buildTranslationCard(shell);
+            buildFooter(shell);
+            buildSourceCard(shell);
+        }
         setContentView(scrollView);
 
         updateLanguageLabels();
@@ -318,7 +328,9 @@ public class TranslateActivity extends Activity {
         container.setBackground(round(CARD, 22, STROKE, 1));
 
         LinearLayout labelRow = horizontal(Gravity.CENTER_VERTICAL);
-        TextView label = label("原文", 12, MUTED, true);
+        TextView label = label(
+                isHomeScreen() ? "原文" : "原文（下で確認・修正）",
+                12, MUTED, true);
         labelRow.addView(label, new LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
 
@@ -328,7 +340,7 @@ public class TranslateActivity extends Activity {
         container.addView(labelRow);
 
         sourceEdit = new EditText(this);
-        sourceEdit.setTextSize(17);
+        sourceEdit.setTextSize(isHomeScreen() ? 17 : 14);
         sourceEdit.setTextColor(INK);
         sourceEdit.setHintTextColor(0xFF9AA3AE);
         sourceEdit.setHint("翻訳するテキストを入力");
@@ -337,8 +349,17 @@ public class TranslateActivity extends Activity {
                 | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
         sourceEdit.setBackgroundColor(Color.TRANSPARENT);
         sourceEdit.setGravity(Gravity.TOP | Gravity.START);
-        sourceEdit.setMinLines(isHomeScreen() ? 5 : 3);
-        sourceEdit.setMaxLines(isHomeScreen() ? 12 : 7);
+        sourceEdit.setMinLines(isHomeScreen() ? 5 : 1);
+        sourceEdit.setMaxLines(isHomeScreen() ? 12 : 3);
+        // A selected article may be thousands of characters; never resize
+        // the popup to fit all of it. The EditText scrolls internally.
+        if (!isHomeScreen()) {
+            sourceEdit.setVerticalScrollBarEnabled(true);
+            sourceEdit.setMovementMethod(
+                    android.text.method.ScrollingMovementMethod.getInstance());
+            sourceEdit.setMaxHeight(dp(78));
+            sourceEdit.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
+        }
         sourceEdit.setPadding(0, dp(8), 0, dp(10));
         sourceEdit.setSelectAllOnFocus(false);
         sourceEdit.setSingleLine(false);
@@ -377,7 +398,7 @@ public class TranslateActivity extends Activity {
         tools.addView(characterCount);
         container.addView(tools);
 
-        root.addView(container, marginBottom(12));
+        root.addView(container, marginBottom(isHomeScreen() ? 12 : 3));
     }
 
     private void buildTranslationCard(LinearLayout root) {
@@ -398,11 +419,26 @@ public class TranslateActivity extends Activity {
         labelRow.addView(progress, sized(19, 19));
         translatedCard.addView(labelRow);
 
-        targetText = label("ここに翻訳結果が表示される", 19, MUTED, false);
+        targetText = label("ここに翻訳結果が表示される",
+                isHomeScreen() ? 19 : 17, MUTED, false);
         targetText.setTextIsSelectable(true);
         targetText.setGravity(Gravity.TOP | Gravity.START);
-        targetText.setPadding(0, dp(17), 0, dp(18));
-        translatedCard.addView(targetText, fillWrap());
+        targetText.setPadding(0, dp(isHomeScreen() ? 17 : 10),
+                0, dp(isHomeScreen() ? 18 : 10));
+        if (isHomeScreen()) {
+            translatedCard.addView(targetText, fillWrap());
+        } else {
+            // Inner scrolling keeps copy/share/speak/replace reachable even
+            // when translating a long fictional article or an entire paragraph.
+            ScrollView translationScroller = new ScrollView(this);
+            translationScroller.setFillViewport(false);
+            translationScroller.setVerticalScrollBarEnabled(true);
+            translationScroller.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
+            translationScroller.addView(targetText, fillWrap());
+            LinearLayout.LayoutParams scrollingParams = fillWrap();
+            scrollingParams.height = dp(230);
+            translatedCard.addView(translationScroller, scrollingParams);
+        }
 
         statusText = label("端末内で翻訳・通信不要", 11, MUTED, false);
         translatedCard.addView(statusText, marginBottom(7));
@@ -581,6 +617,10 @@ public class TranslateActivity extends Activity {
             updateLanguageLabels();
             updateActionState();
 
+            if (!isHomeScreen()) {
+                sourceEdit.clearFocus();
+                scrollView.post(() -> scrollView.scrollTo(0, 0));
+            }
             if (modelPath().isFile()) {
                 startTranslation(true);
             } else {
@@ -1001,12 +1041,22 @@ public class TranslateActivity extends Activity {
         return chunks;
     }
 
+    /**
+     * PLaMo 3: use Preferred Networks' documented PFML3 translation task
+     * through llama.cpp's native /completion endpoint.
+     *
+     * This fixes the English->Japanese request being treated as an English
+     * paraphrasing task. The output language is part of the *token prefix*,
+     * rather than an option that depends on the GGUF chat template.
+     *
+     * PLaMo 2: retain the original JA:/EN: chat instruction.
+     */
     private String callLocalTranslate(String source, String destination,
             int modelGeneration, int sourceDirection) throws Exception {
-        // PLaMo 3 GGUF requires --jinja and a target_lang setting in the
-        // embedded chat template. PLaMo 2 retains its original JA:/EN: mode.
+        boolean isPlamo3 = modelGeneration == 3;
         HttpURLConnection connection = (HttpURLConnection) new URL(
-                "http://127.0.0.1:" + translationPort + "/v1/chat/completions")
+                "http://127.0.0.1:" + translationPort
+                        + (isPlamo3 ? "/completion" : "/v1/chat/completions"))
                 .openConnection();
         activeRequest = connection;
         try {
@@ -1018,29 +1068,43 @@ public class TranslateActivity extends Activity {
                     "application/json; charset=utf-8");
 
             JSONObject request = new JSONObject();
-            request.put("model", "plamo");
-            JSONArray messages = new JSONArray();
-            String prompt = modelGeneration == 2
-                    ? (destination.equals("ja") ? "JA: " : "EN: ") + source
-                    : source;
-            messages.put(new JSONObject()
-                    .put("role", "user")
-                    .put("content", prompt));
-            request.put("messages", messages);
             request.put("temperature", 0);
-            request.put("max_tokens", MAX_OUTPUT_TOKENS);
             request.put("stop", new JSONArray()
                     .put("<|plamo:tag|>")
                     .put("<|plamo:bos|>"));
 
-            if (modelGeneration == 3) {
-                JSONObject options = new JSONObject();
-                options.put("target_lang", destination);
+            if (isPlamo3) {
+                // The official model card explicitly recommends direct PFML3
+                // for production instead of chat_template_kwargs.
+                StringBuilder prompt = new StringBuilder();
+                prompt.append("<|plamo:tag|>dataset<|plamo:msg|>translation");
+                prompt.append("<|plamo:tag|>input");
                 if (sourceDirection != 0) {
-                    options.put("source_lang",
-                            destination.equals("ja") ? "en" : "ja");
+                    // The source language is optional, but accurate when
+                    // explicitly selected; auto mode detects from the text.
+                    prompt.append("<|plamo:key|>lang<|plamo:val|>")
+                            .append(destination.equals("ja") ? "en" : "ja");
                 }
-                request.put("chat_template_kwargs", options);
+                prompt.append("<|plamo:msg|>");
+                prompt.append(source);
+                prompt.append("<|plamo:tag|>output");
+                prompt.append("<|plamo:key|>lang<|plamo:val|>")
+                        .append(destination);
+                prompt.append("<|plamo:msg|>");
+
+                request.put("prompt", prompt.toString());
+                request.put("n_predict", MAX_OUTPUT_TOKENS);
+                request.put("cache_prompt", false);
+                // llama.cpp inserts the BOS token; do not add it here.
+            } else {
+                request.put("model", "plamo");
+                JSONArray messages = new JSONArray();
+                messages.put(new JSONObject()
+                        .put("role", "user")
+                        .put("content", (destination.equals("ja")
+                                ? "JA: " : "EN: ") + source));
+                request.put("messages", messages);
+                request.put("max_tokens", MAX_OUTPUT_TOKENS);
             }
 
             try (OutputStream output = connection.getOutputStream()) {
@@ -1055,16 +1119,24 @@ public class TranslateActivity extends Activity {
                 try (BufferedReader reader = new BufferedReader(
                         new InputStreamReader(stream, StandardCharsets.UTF_8))) {
                     String line;
-                    while ((line = reader.readLine()) != null) response.append(line);
+                    while ((line = reader.readLine()) != null) {
+                        response.append(line);
+                    }
                 }
             }
             if (statusCode < 200 || statusCode >= 300) {
                 throw new IOException("推論HTTP " + statusCode + "："
                         + response.substring(0, Math.min(200, response.length())));
             }
-            return new JSONObject(response.toString())
-                    .getJSONArray("choices").getJSONObject(0)
-                    .getJSONObject("message").optString("content", "");
+
+            JSONObject json = new JSONObject(response.toString());
+            String result = isPlamo3
+                    ? json.optString("content", "")
+                    : json.getJSONArray("choices").getJSONObject(0)
+                          .getJSONObject("message").optString("content", "");
+            return result.replace("<|plamo:bos|>", "")
+                    .replace("<|plamo:tag|>", "")
+                    .trim();
         } finally {
             activeRequest = null;
             connection.disconnect();
