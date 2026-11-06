@@ -29,8 +29,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl -fL --retry 3 --connect-timeout 30 --max-time 400             -o "$RUNNER_TEMP/plamo-smoke/model.gguf"             "https://huggingface.co/pfnet/plamo-3-translate-0.8b-GGUF/resolve/main/plamo-3-translate-0.8b-Q4_K_M.gguf?download=true"
-          test "$(stat -c%s "$RUNNER_TEMP/plamo-smoke/model.gguf")" -gt 500000000
+          curl -fL --retry 3 --connect-timeout 30 --max-time 400             -o "$RUNNER_TEMP/plamo-smoke/model.gguf"             "https://huggingface.co/pfnet/plamo-3-translate-0.8b-GGUF/resolve/main/plamo-3-translate-0.8b-Q4_0.gguf?download=true"
+          test "$(stat -c%s "$RUNNER_TEMP/plamo-smoke/model.gguf")" -gt 520000000
           test "$(head -c4 "$RUNNER_TEMP/plamo-smoke/model.gguf")" = "GGUF"
 
       - name: Start the local PLaMo model server

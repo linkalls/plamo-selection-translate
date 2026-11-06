@@ -282,9 +282,16 @@ public final class ModelService extends Service {
         command.add("--port");
         command.add(Integer.toString(port));
         command.add("-c");
-        command.add("4096");
+        // 3072 contexts are sufficient for our 1050-character chunks and
+        // lower Android KV-cache memory pressure relative to 4096.
+        command.add("3072");
+        int cpuThreads = getSharedPreferences("plamo_prefs", MODE_PRIVATE)
+                .getInt("cpu_threads", 4);
+        cpuThreads = cpuThreads == 2 ? 2 : 4;
         command.add("-t");
-        command.add("4");
+        command.add(Integer.toString(cpuThreads));
+        command.add("-tb");
+        command.add(Integer.toString(cpuThreads));
         command.add("-ngl");
         command.add("0");
         command.add("-np");

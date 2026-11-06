@@ -23,6 +23,17 @@ runtime. Neither the Google Translate app nor Gboard needs to be modified.
   replace new input.
 - **Clipboard:** use the explicit Paste action (no clipboard surveillance).
 - **Offline-first:** every inference call connects to 127.0.0.1 only.
+- **Speed-oriented v0.5:** native llama.cpp /completion SSE streaming shows
+  output as soon as tokens arrive, instead of waiting for the entire result.
+  The default new model download is PFN's smartphone-oriented 0.8B Q4_0
+  GGUF. Existing models are never replaced or downloaded automatically.
+- **Performance tuning:** settings allow switching between 2 and 4 CPU threads,
+  with the server restarting once. The default is 4; Pixel/Tensor performance
+  must be benchmarked on the phone rather than guessed.
+  Context length is reduced from 4096 to 3072 to reduce memory pressure.
+- **GPU caveat:** llama.cpp Vulkan on Mali G710 (the Pixel 7 Pro GPU family)
+  has upstream crash reports as of late 2026; this release retains a stable
+  CPU backend instead of forcing an untested Vulkan GPU path.
 - **Model residency:** an Android foreground service owns the llama.cpp server
   and keeps the loaded model in RAM between popups. Android may still stop the
   process under memory pressure or after a reboot. The notification and the
@@ -30,18 +41,22 @@ runtime. Neither the Google Translate app nor Gboard needs to be modified.
 
 ## First run / PLaMo models
 
-1. Download **PLaMo-Select-v0.4.0-release.apk** from [Releases](../../releases)
+1. Download **PLaMo-Select-v0.5.0-release.apk** from [Releases](../../releases)
    and install it.
 2. On first launch, choose **Download** to fetch PFN's PLaMo 3 Translate 0.8B
-   Q4_K_M GGUF (~570 MB), or select an existing GGUF with the file picker.
+   Q4_0 GGUF (~548 MB, official mobile-oriented quantization), or select an
+   existing GGUF with the file picker.
 3. Choose text from another app, or use the full-screen home screen.
 
 The model is downloaded **only after explicit user consent**, from the official
 [pfnet/plamo-3-translate-0.8b-GGUF](https://huggingface.co/pfnet/plamo-3-translate-0.8b-GGUF)
 Hugging Face repository. It is not included in the APK, and is subject to the
 [PLaMo Community License](https://plamo.preferredai.jp/).
-The default 0.8B GGUF is suitable for testing on modern Android phones; actual
-performance, memory consumption and compatibility are device dependent.
+The default 0.8B Q4_0 GGUF is optimized in some mobile llama.cpp kernels;
+actual speed relative to Q4_K_M on Tensor G2 is **unmeasured**, and other
+Android devices may behave differently. Progressively revealed output improves
+perceived latency; it does not by itself increase tokens per second.
+Elapsed time is shown in the translation result UI.
 
 For PLaMo 3 the app uses the PFN-recommended PFML3 prompt and llama.cpp
 /completion API. This reliably encodes the target language inside the prompt,
@@ -56,6 +71,15 @@ translation or copy/share actions.
 PLaMo 3's model also supports an embedded Jinja chat template, but the direct
 /completion path is used to avoid subtle template / options compatibility
 issues. The native server remains configured with --jinja.
+
+## Reproducible inference smoke test
+
+The public on-demand
+[translation-smoke workflow](.github/workflows/translation-smoke.yml)
+downloads the official Q4_0 GGUF into an ephemeral GitHub runner and checks
+English→Japanese, Japanese→English, auto-source detection and SSE streaming.
+The native test validates protocol compatibility but is **not a Pixel 7 Pro
+benchmark**: Android timing and thermal conditions differ.
 
 ## Android build
 

@@ -641,30 +641,37 @@ public class TranslateActivity extends Activity {
         ModelService service = modelService;
         String modelStatus = service != null && service.isModelResident()
                 ? "メモリ常駐中" : "未起動";
+        String quantization = getSharedPreferences("plamo_prefs", MODE_PRIVATE)
+                .getString("model_quantization", "旧モデル");
         int backend = getSharedPreferences("plamo_prefs", MODE_PRIVATE).getInt("plamo_generation", 3);
 
         new AlertDialog.Builder(this)
                 .setTitle("PLaMo 設定")
                 .setMessage("モデル：" + size + "\n状態：" + modelStatus
                         + "\nモデル形式：PLaMo " + backend
+                        + " / " + quantization
                         + "\n翻訳は端末内のみで処理するよ。")
                 .setItems(new String[] {
-                        "PLaMo 3モデルをダウンロード（約570 MB）",
+                        "高速モデル Q4_0 をダウンロード（約548 MB）",
+                        "標準モデル Q4_K_M をダウンロード（約573 MB）",
                         "端末内のGGUFファイルを選択",
+                        "CPUスレッド設定（2 / 4）",
                         "PLaMo 3用の翻訳形式",
                         "PLaMo 2用の翻訳形式",
                         "モデルを停止・RAMを解放"
                 }, (dialog, selected) -> {
-                    if (selected == 0) {
-                        confirmModelDownload();
-                    } else if (selected == 1) {
+                    if (selected == 0 || selected == 1) {
+                        confirmModelDownload(selected == 0 ? "Q4_0" : "Q4_K_M");
+                    } else if (selected == 2) {
                         openModelPicker();
-                    } else if (selected == 2 || selected == 3) {
-                        int generation = selected == 2 ? 3 : 2;
+                    } else if (selected == 3) {
+                        showCpuThreadSettings();
+                    } else if (selected == 4 || selected == 5) {
+                        int generation = selected == 4 ? 3 : 2;
                         getSharedPreferences("plamo_prefs", MODE_PRIVATE).edit()
                                 .putInt("plamo_generation", generation).apply();
                         setStatus("翻訳形式を PLaMo " + generation + " に設定", false);
-                        // The server's --jinja flag differs by model family.
+                        // The model's chat template differs by generation.
                         ModelService currentService = modelService;
                         if (currentService != null) currentService.requestModelReload();
                         if (!sourceEdit.getText().toString().trim().isEmpty()) {
@@ -678,28 +685,58 @@ public class TranslateActivity extends Activity {
                 .show();
     }
 
+    private void showCpuThreadSettings() {
+        int current = getSharedPreferences("plamo_prefs", MODE_PRIVATE)
+                .getInt("cpu_threads", 4);
+        // Thread count cannot be assumed faster simply because it is larger.
+        // Different ARM big.LITTLE schedulers may prefer different values.
+        new AlertDialog.Builder(this)
+                .setTitle("CPU推論のスレッド数")
+                .setMessage("Pixelなどのbig.LITTLE端末では4スレッドより"
+                        + "2スレッドの方が速い場合もあるよ。"
+                        + "\n切り替えると一度だけモデルが再起動する。")
+                .setSingleChoiceItems(new String[]{
+                        "2スレッド（発熱控えめ）", "4スレッド（標準）"
+                }, current == 2 ? 0 : 1, (dialog, choice) -> {
+                    int threads = choice == 0 ? 2 : 4;
+                    getSharedPreferences("plamo_prefs", MODE_PRIVATE).edit()
+                            .putInt("cpu_threads", threads).apply();
+                    ModelService service = modelService;
+                    if (service != null) service.requestModelReload();
+                    setStatus("CPU " + threads + "スレッドに変更。モデル再起動中", false);
+                    dialog.dismiss();
+                })
+                .setNegativeButton("キャンセル", null)
+                .show();
+    }
+
     private void showModelSetup() {
         if (destroyed || modelPath().isFile()) return;
         new AlertDialog.Builder(this)
                 .setTitle("オフライン翻訳の準備")
                 .setMessage("PLaMo 3 Translateの軽量モデルを最初に1回だけ"
                         + "用意するよ。翻訳時は通信不要。"
-                        + "\n\n公式モデル：0.8B / Q4_K_M（約570 MB）"
+                        + "\n\nおすすめ：0.8B / Q4_0（約548 MB・スマホ向け）"
                         + "\nダウンロードするか、保存済みのGGUFを使える。")
-                .setPositiveButton("ダウンロード", (dialog, which) -> confirmModelDownload())
+                .setPositiveButton("ダウンロード", (dialog, which) ->
+                        confirmModelDownload("Q4_0"))
                 .setNeutralButton("ファイルから選択", (dialog, which) -> openModelPicker())
                 .setNegativeButton("あとで", null)
                 .show();
     }
 
-    private void confirmModelDownload() {
+    private void confirmModelDownload(String quantization) {
+        final boolean fastModel = "Q4_0".equals(quantization);
+        final String variant = fastModel ? "Q4_0（約548 MB）" : "Q4_K_M（約573 MB）";
         new AlertDialog.Builder(this)
                 .setTitle("PLaMo 3モデルを入手")
-                .setMessage("Preferred Networks公式Hugging Faceから約570 MBを"
-                        + "ダウンロードして端末に保存するよ。"
-                        + "\nWi-Fi推奨・十分な空き容量が必要。"
-                        + "\nモデルにはPLaMo Community Licenseが適用される。")
-                .setPositiveButton("ダウンロード開始", (dialog, which) -> downloadOfficialModel())
+                .setMessage("Preferred Networks公式Hugging Faceから "
+                        + variant + " をダウンロードして端末に保存するよ。"
+                        + "\nQ4_0は公式がスマホ向けに推奨する形式。"
+                        + "\nただしTensor G2上の速度差は実機で未計測。"
+                        + "\nWi-Fi推奨。モデルにはPLaMo Community Licenseが適用される。")
+                .setPositiveButton("ダウンロード開始",
+                        (dialog, which) -> downloadOfficialModel(quantization))
                 .setNeutralButton("モデルの詳細", (dialog, which) -> {
                     Intent browser = new Intent(Intent.ACTION_VIEW,
                             Uri.parse("https://huggingface.co/pfnet/"
@@ -710,7 +747,7 @@ public class TranslateActivity extends Activity {
                 .show();
     }
 
-    private void downloadOfficialModel() {
+    private void downloadOfficialModel(String quantization) {
         if (changingModel) return;
         if (getFilesDir().getUsableSpace() < 800_000_000L) {
             setStatus("空き容量が不足している（800 MB以上推奨）", true);
@@ -727,7 +764,8 @@ public class TranslateActivity extends Activity {
             try {
                 URL source = new URL("https://huggingface.co/pfnet/"
                         + "plamo-3-translate-0.8b-GGUF/resolve/main/"
-                        + "plamo-3-translate-0.8b-Q4_K_M.gguf?download=true");
+                        + "plamo-3-translate-0.8b-" + quantization
+                        + ".gguf?download=true");
                 download = (HttpURLConnection) source.openConnection();
                 download.setConnectTimeout(20_000);
                 download.setReadTimeout(60_000);
@@ -764,7 +802,7 @@ public class TranslateActivity extends Activity {
                     output.flush();
                 }
                 verifyGGUF(temporary);
-                finishModelImport(temporary, 3);
+                finishModelImport(temporary, 3, quantization);
             } catch (Exception error) {
                 temporary.delete();
                 mainHandler.post(() -> {
@@ -791,11 +829,13 @@ public class TranslateActivity extends Activity {
         }
     }
 
-    private void finishModelImport(File temporary, int generation) throws IOException {
+    private void finishModelImport(File temporary, int generation,
+            String quantization) throws IOException {
         java.nio.file.Files.move(temporary.toPath(), modelPath().toPath(),
                 java.nio.file.StandardCopyOption.REPLACE_EXISTING);
         getSharedPreferences("plamo_prefs", MODE_PRIVATE).edit()
-                .putInt("plamo_generation", generation).apply();
+                .putInt("plamo_generation", generation)
+                .putString("model_quantization", quantization).apply();
         mainHandler.post(() -> {
             changingModel = false;
             ModelService service = modelService;
@@ -869,7 +909,7 @@ public class TranslateActivity extends Activity {
                 }
                 output.flush();
                 verifyGGUF(temporary);
-                finishModelImport(temporary, modelGeneration);
+                finishModelImport(temporary, modelGeneration, "手動インポート");
             } catch (Exception error) {
                 temporary.delete();
                 mainHandler.post(() -> {
@@ -958,6 +998,7 @@ public class TranslateActivity extends Activity {
                 translationPort = port;
                 if (isStale(request)) return;
                 final List<String> chunks = splitIntoChunks(original, CHUNK_LENGTH);
+                final long startedAt = android.os.SystemClock.elapsedRealtime();
                 StringBuilder translated = new StringBuilder();
 
                 for (int i = 0; i < chunks.size(); i++) {
@@ -967,8 +1008,25 @@ public class TranslateActivity extends Activity {
                         if (!isStale(request)) setStatus("翻訳中 " + currentIndex
                                 + " / " + chunks.size(), false);
                     });
+                    // Stream partial tokens directly into the result card. On
+                    // a slow phone the user sees translation immediately after
+                    // the first generated token instead of waiting for all.
+                    final String completedChunks = translated.toString();
                     String result = callLocalTranslate(chunks.get(i), destination,
-                            modelGeneration, capturedDirectionMode);
+                            modelGeneration, capturedDirectionMode, partial -> {
+                                if (isStale(request)) return;
+                                final String visible = completedChunks
+                                        + (completedChunks.isEmpty() ? "" : "\n\n")
+                                        + partial;
+                                mainHandler.post(() -> {
+                                    if (isStale(request)) return;
+                                    targetText.setText(visible);
+                                    targetText.setTextColor(INK);
+                                    long seconds = (android.os.SystemClock
+                                            .elapsedRealtime() - startedAt) / 1000;
+                                    setStatus("生成中 · " + seconds + "秒経過", false);
+                                });
+                            });
                     if (result.trim().isEmpty()) {
                         throw new IOException("空の翻訳結果が返った");
                     }
@@ -990,7 +1048,9 @@ public class TranslateActivity extends Activity {
                     progress.setVisibility(View.GONE);
                     targetText.setText(translatedText);
                     targetText.setTextColor(INK);
-                    setStatus("オフラインで翻訳完了", false);
+                    long elapsed = android.os.SystemClock.elapsedRealtime() - startedAt;
+                    setStatus(String.format(java.util.Locale.JAPAN,
+                            "オフライン翻訳完了 · %.1f秒", elapsed / 1000.0), false);
                     updateActionState();
                 });
             } catch (Exception error) {
@@ -1052,7 +1112,8 @@ public class TranslateActivity extends Activity {
      * PLaMo 2: retain the original JA:/EN: chat instruction.
      */
     private String callLocalTranslate(String source, String destination,
-            int modelGeneration, int sourceDirection) throws Exception {
+            int modelGeneration, int sourceDirection,
+            java.util.function.Consumer<String> onPartial) throws Exception {
         boolean isPlamo3 = modelGeneration == 3;
         HttpURLConnection connection = (HttpURLConnection) new URL(
                 "http://127.0.0.1:" + translationPort
@@ -1066,9 +1127,14 @@ public class TranslateActivity extends Activity {
             connection.setReadTimeout(240_000);
             connection.setRequestProperty("Content-Type",
                     "application/json; charset=utf-8");
+            connection.setRequestProperty("Accept",
+                    isPlamo3 ? "text/event-stream" : "application/json");
 
             JSONObject request = new JSONObject();
             request.put("temperature", 0);
+            // llama.cpp /completion emits incremental SSE events when enabled.
+            // Legacy PLaMo 2 remains non-streaming for compatibility.
+            request.put("stream", isPlamo3);
             request.put("stop", new JSONArray()
                     .put("<|plamo:tag|>")
                     .put("<|plamo:bos|>"));
@@ -1112,31 +1178,75 @@ public class TranslateActivity extends Activity {
             }
 
             int statusCode = connection.getResponseCode();
-            InputStream stream = statusCode >= 200 && statusCode < 300
-                    ? connection.getInputStream() : connection.getErrorStream();
-            StringBuilder response = new StringBuilder();
-            if (stream != null) {
-                try (BufferedReader reader = new BufferedReader(
-                        new InputStreamReader(stream, StandardCharsets.UTF_8))) {
-                    String line;
-                    while ((line = reader.readLine()) != null) {
-                        response.append(line);
+            if (statusCode < 200 || statusCode >= 300) {
+                StringBuilder failure = new StringBuilder();
+                InputStream errorStream = connection.getErrorStream();
+                if (errorStream != null) {
+                    try (BufferedReader reader = new BufferedReader(
+                            new InputStreamReader(errorStream, StandardCharsets.UTF_8))) {
+                        String line;
+                        while ((line = reader.readLine()) != null) {
+                            failure.append(line);
+                            if (failure.length() >= 300) break;
+                        }
                     }
                 }
-            }
-            if (statusCode < 200 || statusCode >= 300) {
                 throw new IOException("推論HTTP " + statusCode + "："
-                        + response.substring(0, Math.min(200, response.length())));
+                        + failure.substring(0, Math.min(200, failure.length())));
             }
 
-            JSONObject json = new JSONObject(response.toString());
-            String result = isPlamo3
-                    ? json.optString("content", "")
-                    : json.getJSONArray("choices").getJSONObject(0)
-                          .getJSONObject("message").optString("content", "");
-            return result.replace("<|plamo:bos|>", "")
-                    .replace("<|plamo:tag|>", "")
-                    .trim();
+            if (isPlamo3) {
+                StringBuilder streamed = new StringBuilder();
+                long lastUpdate = android.os.SystemClock.elapsedRealtime();
+
+                // Native llama.cpp SSE format: data: {"content":"..."}
+                // followed by data: [DONE]. Decode UTF-8 text incrementally.
+                try (BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(connection.getInputStream(),
+                                StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        if (Thread.currentThread().isInterrupted() || destroyed) {
+                            throw new IOException("翻訳を中断した");
+                        }
+                        if (!line.startsWith("data: ")) continue;
+                        String jsonLine = line.substring(6).trim();
+                        if ("[DONE]".equals(jsonLine)) break;
+                        if (jsonLine.isEmpty()) continue;
+                        JSONObject event = new JSONObject(jsonLine);
+                        if (event.has("error")) {
+                            throw new IOException("推論エラー：" + event.get("error"));
+                        }
+                        String token = event.optString("content", "");
+                        if (token.isEmpty()) continue;
+                        streamed.append(token);
+
+                        // Throttle UI updates; do not post a Runnable per token.
+                        long now = android.os.SystemClock.elapsedRealtime();
+                        if (now - lastUpdate >= 90) {
+                            onPartial.accept(streamed.toString());
+                            lastUpdate = now;
+                        }
+                    }
+                }
+                String result = streamed.toString().replace("<|plamo:bos|>", "")
+                        .replace("<|plamo:tag|>", "").trim();
+                if (!result.isEmpty()) onPartial.accept(result);
+                return result;
+            }
+
+            StringBuilder response = new StringBuilder();
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(connection.getInputStream(),
+                            StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    response.append(line);
+                }
+            }
+            return new JSONObject(response.toString())
+                    .getJSONArray("choices").getJSONObject(0)
+                    .getJSONObject("message").optString("content", "").trim();
         } finally {
             activeRequest = null;
             connection.disconnect();
