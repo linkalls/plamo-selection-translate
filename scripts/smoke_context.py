@@ -3,7 +3,8 @@
 
 No article text is uploaded to a cloud translation API. The GitHub runner
 loads the 0.8B GGUF and sends prompt requests to its local llama.cpp server.
-The test text matches the newly authored fictional regression paragraphs.
+The test uses a newly authored, entirely fictional three-paragraph scenario.
+No third-party news article is stored in this repository or printed in CI.
 """
 
 import json
@@ -91,7 +92,8 @@ def main():
         history.append((original, text))
         print(f"Article paragraph {index + 1}/3: {text}", flush=True)
 
-    # These assertions specifically catch the user's observed corruption.
+    # These semantic checks catch the truncation and wrong 'next week' sense
+    # originally seen in the app without redistributing news article text.
     last = history[-1][1]
     assert "来週" in last, f"The final next-week clause vanished: {last}"
     assert "弾劾" in last, f"The impeachment decision vanished: {last}"

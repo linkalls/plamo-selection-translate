@@ -95,10 +95,11 @@ when it receives multiple sentences as one request. The UI therefore translates
 each segment in sequence and concatenates all results. An incomplete SSE stream
 or token-limit stop is reported as an error, not a successful full translation.
 
-The public smoke test compiles the production Java splitting class without an
-Android emulator, then passes the extracted segments of a fictional multiline
-article through the real PLaMo 3 GGUF using streaming. It verifies numerical
-facts from the headline and body survive the translation.
+The public smoke test compiles the production Java segmentation and PFML3
+prompt classes without an Android emulator, then tests a **newly authored,
+fictional three-paragraph scenario** against the real PLaMo 3 GGUF with
+streaming and history. It checks that the final paragraph still refers to a
+vote next week instead of a holiday. No third-party article is included.
 
 ## Smooth floating-result scrolling and device diagnosis (v0.7)
 
