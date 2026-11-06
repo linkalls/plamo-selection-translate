@@ -77,8 +77,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public class TranslateActivity extends Activity {
     private static final int REQUEST_MODEL = 2307;
-    private static final int CHUNK_LENGTH = 1050;
-    private static final int MAX_OUTPUT_TOKENS = 1536;
+    private static final int REQUEST_SETTINGS = 2308;
+    private static final int DEFAULT_MAX_OUTPUT_TOKENS = 512;
     private static final String MODEL_FILENAME = "plamo-translate.gguf";
 
     private static final int BLUE = 0xFF0B57D0;
@@ -109,6 +109,8 @@ public class TranslateActivity extends Activity {
     private volatile ModelService modelService;
 
     private ScrollView scrollView;
+    private ScrollView resultScroller;
+    private LinearLayout sourceCardContainer;
     private EditText sourceEdit;
     private TextView targetText;
     private TextView sourceLanguageChip;
@@ -202,12 +204,18 @@ public class TranslateActivity extends Activity {
         } else {
             int width = getResources().getDisplayMetrics().widthPixels;
             int height = getResources().getDisplayMetrics().heightPixels;
-            window.setGravity(Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+            int position = getSharedPreferences("plamo_prefs", MODE_PRIVATE)
+                    .getInt("popup_position", 0);
+            window.setGravity(position == 0
+                    ? Gravity.CENTER : Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
             window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
             window.setDimAmount(0.30f);
             // Keep the source app clearly visible, even on smaller screens.
-            window.setLayout(Math.min(dp(460), width - dp(12)),
-                    Math.min(dp(610), (int) (height * 0.72f)));
+            boolean showOriginal = getSharedPreferences("plamo_prefs", MODE_PRIVATE)
+                    .getBoolean("show_source_preview", false);
+            window.setLayout(Math.min(dp(460), width - dp(16)),
+                    Math.min(dp(showOriginal ? 550 : 445),
+                            (int) (height * 0.77f)));
             window.setSoftInputMode(
                     WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
                     | WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
@@ -324,6 +332,7 @@ public class TranslateActivity extends Activity {
 
     private void buildSourceCard(LinearLayout root) {
         LinearLayout container = vertical();
+        sourceCardContainer = container;
         container.setPadding(dp(16), dp(12), dp(16), dp(10));
         container.setBackground(round(CARD, 22, STROKE, 1));
 
@@ -398,6 +407,10 @@ public class TranslateActivity extends Activity {
         tools.addView(characterCount);
         container.addView(tools);
 
+        if (!isHomeScreen() && !getSharedPreferences("plamo_prefs", MODE_PRIVATE)
+                .getBoolean("show_source_preview", false)) {
+            container.setVisibility(View.GONE);
+        }
         root.addView(container, marginBottom(isHomeScreen() ? 12 : 3));
     }
 
@@ -419,8 +432,11 @@ public class TranslateActivity extends Activity {
         labelRow.addView(progress, sized(19, 19));
         translatedCard.addView(labelRow);
 
+        int resultFont = getSharedPreferences("plamo_prefs", MODE_PRIVATE)
+                .getInt("result_font_size", 17);
         targetText = label("ここに翻訳結果が表示される",
-                isHomeScreen() ? 19 : 17, MUTED, false);
+                isHomeScreen() ? Math.max(16, resultFont) : resultFont,
+                MUTED, false);
         targetText.setTextIsSelectable(true);
         targetText.setGravity(Gravity.TOP | Gravity.START);
         targetText.setPadding(0, dp(isHomeScreen() ? 17 : 10),
@@ -430,14 +446,16 @@ public class TranslateActivity extends Activity {
         } else {
             // Inner scrolling keeps copy/share/speak/replace reachable even
             // when translating a long fictional article or an entire paragraph.
-            ScrollView translationScroller = new ScrollView(this);
-            translationScroller.setFillViewport(false);
-            translationScroller.setVerticalScrollBarEnabled(true);
-            translationScroller.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
-            translationScroller.addView(targetText, fillWrap());
+            resultScroller = new ScrollView(this);
+            resultScroller.setFillViewport(false);
+            resultScroller.setVerticalScrollBarEnabled(true);
+            resultScroller.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
+            resultScroller.addView(targetText, fillWrap());
             LinearLayout.LayoutParams scrollingParams = fillWrap();
-            scrollingParams.height = dp(230);
-            translatedCard.addView(translationScroller, scrollingParams);
+            // Dynamic height below starts small rather than wasting the
+            // whole popup for a translated headline.
+            scrollingParams.height = dp(96);
+            translatedCard.addView(resultScroller, scrollingParams);
         }
 
         statusText = label("端末内で翻訳・通信不要", 11, MUTED, false);
@@ -470,6 +488,28 @@ public class TranslateActivity extends Activity {
         root.addView(translatedCard, marginBottom(13));
     }
 
+    private void updateResultHeight() {
+        if (resultScroller == null) return;
+        resultScroller.post(() -> {
+            if (destroyed || resultScroller == null) return;
+            int contentHeight = targetText.getLayout() == null
+                    ? dp(96) : targetText.getLayout().getHeight()
+                        + targetText.getPaddingTop() + targetText.getPaddingBottom();
+            int requested = Math.min(dp(225), Math.max(dp(92), contentHeight));
+            ViewGroup.LayoutParams layout = resultScroller.getLayoutParams();
+            if (layout != null && layout.height != requested) {
+                layout.height = requested;
+                resultScroller.setLayoutParams(layout);
+            }
+        });
+    }
+
+    private void displayTranslation(String content, int color) {
+        targetText.setText(content);
+        targetText.setTextColor(color);
+        updateResultHeight();
+    }
+
     private void buildFooter(LinearLayout root) {
         LinearLayout row = horizontal(Gravity.CENTER_VERTICAL);
 
@@ -481,6 +521,17 @@ public class TranslateActivity extends Activity {
         translateAction.setOnClickListener(v -> startTranslation(true));
         row.addView(translateAction, sized(108, 42));
         root.addView(row);
+        if (!isHomeScreen()) {
+            TextView toggle = label("原文を表示・編集", 12, BLUE, true);
+            toggle.setPadding(dp(8), dp(10), dp(8), dp(8));
+            toggle.setOnClickListener(v -> {
+                if (sourceCardContainer == null) return;
+                boolean open = sourceCardContainer.getVisibility() != View.VISIBLE;
+                sourceCardContainer.setVisibility(open ? View.VISIBLE : View.GONE);
+                toggle.setText(open ? "原文を閉じる" : "原文を表示・編集");
+            });
+            root.addView(toggle);
+        }
     }
 
     private void onSourceChanged(String text) {
@@ -490,13 +541,14 @@ public class TranslateActivity extends Activity {
             updateLanguageLabels();
         }
         translatedText = "";
-        targetText.setText(text.isEmpty()
-                ? "ここに翻訳結果が表示される" : "翻訳を準備中…");
-        targetText.setTextColor(MUTED);
+        displayTranslation(text.isEmpty()
+                ? "ここに翻訳結果が表示される" : "翻訳を準備中…", MUTED);
         setStatus("端末内で翻訳・通信不要", false);
         updateActionState();
 
-        if (!text.trim().isEmpty() && modelPath().isFile()) {
+        if (!text.trim().isEmpty() && modelPath().isFile()
+                && getSharedPreferences("plamo_prefs", MODE_PRIVATE)
+                    .getBoolean("auto_translate", true)) {
             // Debounce text entry so slow on-device models are not invoked on
             // every keystroke, while the text selection path remains instant.
             debounce = () -> startTranslation(false);
@@ -612,8 +664,7 @@ public class TranslateActivity extends Activity {
             isProcessTextRequest = true;
             setSourceTextSilently(selection.toString());
             translatedText = "";
-            targetText.setText("翻訳を準備中…");
-            targetText.setTextColor(MUTED);
+            displayTranslation("翻訳を準備中…", MUTED);
             updateLanguageLabels();
             updateActionState();
 
@@ -634,55 +685,8 @@ public class TranslateActivity extends Activity {
     }
 
     private void openSettings() {
-        File model = modelPath();
-        String size = model.isFile()
-                ? (model.length() / 1_000_000) + " MB"
-                : "未登録";
-        ModelService service = modelService;
-        String modelStatus = service != null && service.isModelResident()
-                ? "メモリ常駐中" : "未起動";
-        String quantization = getSharedPreferences("plamo_prefs", MODE_PRIVATE)
-                .getString("model_quantization", "旧モデル");
-        int backend = getSharedPreferences("plamo_prefs", MODE_PRIVATE).getInt("plamo_generation", 3);
-
-        new AlertDialog.Builder(this)
-                .setTitle("PLaMo 設定")
-                .setMessage("モデル：" + size + "\n状態：" + modelStatus
-                        + "\nモデル形式：PLaMo " + backend
-                        + " / " + quantization
-                        + "\n翻訳は端末内のみで処理するよ。")
-                .setItems(new String[] {
-                        "高速モデル Q4_0 をダウンロード（約548 MB）",
-                        "標準モデル Q4_K_M をダウンロード（約573 MB）",
-                        "端末内のGGUFファイルを選択",
-                        "CPUスレッド設定（2 / 4）",
-                        "PLaMo 3用の翻訳形式",
-                        "PLaMo 2用の翻訳形式",
-                        "モデルを停止・RAMを解放"
-                }, (dialog, selected) -> {
-                    if (selected == 0 || selected == 1) {
-                        confirmModelDownload(selected == 0 ? "Q4_0" : "Q4_K_M");
-                    } else if (selected == 2) {
-                        openModelPicker();
-                    } else if (selected == 3) {
-                        showCpuThreadSettings();
-                    } else if (selected == 4 || selected == 5) {
-                        int generation = selected == 4 ? 3 : 2;
-                        getSharedPreferences("plamo_prefs", MODE_PRIVATE).edit()
-                                .putInt("plamo_generation", generation).apply();
-                        setStatus("翻訳形式を PLaMo " + generation + " に設定", false);
-                        // The model's chat template differs by generation.
-                        ModelService currentService = modelService;
-                        if (currentService != null) currentService.requestModelReload();
-                        if (!sourceEdit.getText().toString().trim().isEmpty()) {
-                            startTranslation(true);
-                        }
-                    } else {
-                        stopResidentService();
-                    }
-                })
-                .setNegativeButton("閉じる", null)
-                .show();
+        startActivityForResult(new Intent(this, SettingsActivity.class),
+                REQUEST_SETTINGS);
     }
 
     private void showCpuThreadSettings() {
@@ -864,6 +868,19 @@ public class TranslateActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_SETTINGS) {
+            if (resultCode == RESULT_OK && data != null) {
+                String action = data.getStringExtra(SettingsActivity.EXTRA_ACTION);
+                if (SettingsActivity.ACTION_MODEL_IMPORT.equals(action)) {
+                    openModelPicker();
+                } else if (SettingsActivity.ACTION_DOWNLOAD_Q4_0.equals(action)) {
+                    confirmModelDownload("Q4_0");
+                } else if (SettingsActivity.ACTION_DOWNLOAD_Q4_K_M.equals(action)) {
+                    confirmModelDownload("Q4_K_M");
+                }
+            }
+            return;
+        }
         if (requestCode != REQUEST_MODEL || resultCode != RESULT_OK
                 || data == null || data.getData() == null) {
             return;
@@ -979,10 +996,11 @@ public class TranslateActivity extends Activity {
         final String destination = selectedTargetLanguage(original);
         final int modelGeneration = getSharedPreferences("plamo_prefs", MODE_PRIVATE).getInt("plamo_generation", 3);
         final int capturedDirectionMode = directionMode;
+        final int maxTokens = getSharedPreferences("plamo_prefs", MODE_PRIVATE)
+                .getInt("max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS);
         lastTarget = destination;
         translatedText = "";
-        targetText.setText("翻訳中…");
-        targetText.setTextColor(MUTED);
+        displayTranslation("翻訳中…", MUTED);
         setStatus("モデルを準備中…", false);
         progress.setVisibility(View.VISIBLE);
         updateActionState();
@@ -997,7 +1015,12 @@ public class TranslateActivity extends Activity {
                 final int port = awaitModelPort();
                 translationPort = port;
                 if (isStale(request)) return;
-                final List<String> chunks = splitIntoChunks(original, CHUNK_LENGTH);
+                int maxChars = getSharedPreferences("plamo_prefs", MODE_PRIVATE)
+                        .getInt("chunk_chars", 220);
+                final List<String> chunks = TranslationSegments.split(original, maxChars);
+                if (chunks.isEmpty()) {
+                    throw new IOException("翻訳できる文章が見つからない");
+                }
                 final long startedAt = android.os.SystemClock.elapsedRealtime();
                 StringBuilder translated = new StringBuilder();
 
@@ -1013,7 +1036,7 @@ public class TranslateActivity extends Activity {
                     // the first generated token instead of waiting for all.
                     final String completedChunks = translated.toString();
                     String result = callLocalTranslate(chunks.get(i), destination,
-                            modelGeneration, capturedDirectionMode, partial -> {
+                            modelGeneration, capturedDirectionMode, maxTokens, partial -> {
                                 if (isStale(request)) return;
                                 final String visible = completedChunks
                                         + (completedChunks.isEmpty() ? "" : "\n\n")
@@ -1036,8 +1059,7 @@ public class TranslateActivity extends Activity {
                     final String preview = translated.toString();
                     mainHandler.post(() -> {
                         if (!isStale(request)) {
-                            targetText.setText(preview);
-                            targetText.setTextColor(INK);
+                            displayTranslation(preview, INK);
                         }
                     });
                 }
@@ -1046,8 +1068,7 @@ public class TranslateActivity extends Activity {
                     if (isStale(request)) return;
                     translatedText = translated.toString();
                     progress.setVisibility(View.GONE);
-                    targetText.setText(translatedText);
-                    targetText.setTextColor(INK);
+                    displayTranslation(translatedText, INK);
                     long elapsed = android.os.SystemClock.elapsedRealtime() - startedAt;
                     setStatus(String.format(java.util.Locale.JAPAN,
                             "オフライン翻訳完了 · %.1f秒", elapsed / 1000.0), false);
@@ -1057,8 +1078,7 @@ public class TranslateActivity extends Activity {
                 mainHandler.post(() -> {
                     if (isStale(request)) return;
                     progress.setVisibility(View.GONE);
-                    targetText.setText("翻訳できなかった");
-                    targetText.setTextColor(MUTED);
+                    displayTranslation("翻訳できなかった", MUTED);
                     setStatus(error.getMessage() == null
                             ? "翻訳エラー" : error.getMessage(), true);
                     updateActionState();
@@ -1112,7 +1132,7 @@ public class TranslateActivity extends Activity {
      * PLaMo 2: retain the original JA:/EN: chat instruction.
      */
     private String callLocalTranslate(String source, String destination,
-            int modelGeneration, int sourceDirection,
+            int modelGeneration, int sourceDirection, int maxTokens,
             java.util.function.Consumer<String> onPartial) throws Exception {
         boolean isPlamo3 = modelGeneration == 3;
         HttpURLConnection connection = (HttpURLConnection) new URL(
@@ -1159,7 +1179,7 @@ public class TranslateActivity extends Activity {
                 prompt.append("<|plamo:msg|>");
 
                 request.put("prompt", prompt.toString());
-                request.put("n_predict", MAX_OUTPUT_TOKENS);
+                request.put("n_predict", maxTokens);
                 request.put("cache_prompt", false);
                 // llama.cpp inserts the BOS token; do not add it here.
             } else {
@@ -1170,7 +1190,7 @@ public class TranslateActivity extends Activity {
                         .put("content", (destination.equals("ja")
                                 ? "JA: " : "EN: ") + source));
                 request.put("messages", messages);
-                request.put("max_tokens", MAX_OUTPUT_TOKENS);
+                request.put("max_tokens", maxTokens);
             }
 
             try (OutputStream output = connection.getOutputStream()) {
@@ -1198,6 +1218,8 @@ public class TranslateActivity extends Activity {
             if (isPlamo3) {
                 StringBuilder streamed = new StringBuilder();
                 long lastUpdate = android.os.SystemClock.elapsedRealtime();
+                boolean receivedFinalEvent = false;
+                String completionStopReason = "";
 
                 // Native llama.cpp SSE format: data: {"content":"..."}
                 // followed by data: [DONE]. Decode UTF-8 text incrementally.
@@ -1217,6 +1239,10 @@ public class TranslateActivity extends Activity {
                         if (event.has("error")) {
                             throw new IOException("推論エラー：" + event.get("error"));
                         }
+                        if (event.optBoolean("stop", false)) {
+                            receivedFinalEvent = true;
+                            completionStopReason = event.optString("stop_type", "");
+                        }
                         String token = event.optString("content", "");
                         if (token.isEmpty()) continue;
                         streamed.append(token);
@@ -1228,6 +1254,14 @@ public class TranslateActivity extends Activity {
                             lastUpdate = now;
                         }
                     }
+                }
+                if (!receivedFinalEvent) {
+                    throw new IOException("推論ストリームが最終応答なしで終了した。"
+                            + "途中までの訳文は未確定。再試行してね");
+                }
+                if ("limit".equals(completionStopReason)) {
+                    throw new IOException("生成上限に達したため翻訳が途中終了。"
+                            + "設定で最大生成トークン数を増やしてね");
                 }
                 String result = streamed.toString().replace("<|plamo:bos|>", "")
                         .replace("<|plamo:tag|>", "").trim();

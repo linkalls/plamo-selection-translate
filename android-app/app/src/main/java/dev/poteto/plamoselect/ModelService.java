@@ -282,9 +282,12 @@ public final class ModelService extends Service {
         command.add("--port");
         command.add(Integer.toString(port));
         command.add("-c");
-        // 3072 contexts are sufficient for our 1050-character chunks and
-        // lower Android KV-cache memory pressure relative to 4096.
-        command.add("3072");
+        // Keep the context-window size user-configurable for different
+        // memory budgets; server restarts only when this setting changes.
+        int context = getSharedPreferences("plamo_prefs", MODE_PRIVATE)
+                .getInt("ctx_size", 3072);
+        context = context == 2048 || context == 4096 ? context : 3072;
+        command.add(Integer.toString(context));
         int cpuThreads = getSharedPreferences("plamo_prefs", MODE_PRIVATE)
                 .getInt("cpu_threads", 4);
         cpuThreads = cpuThreads == 2 ? 2 : 4;

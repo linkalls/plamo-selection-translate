@@ -46,11 +46,22 @@ jobs:
           ) &
           echo "$!" > "$RUNNER_TEMP/plamo-smoke/server.pid"
 
-      - name: Translate English, Japanese, and auto-detected source
+      - name: Run actual Android sentence splitter regression
         shell: bash
         run: |
           set -euo pipefail
-          python3 scripts/smoke_pfml3.py
+          mkdir -p "$RUNNER_TEMP/plamo-smoke/classes"
+          javac -encoding UTF-8 -d "$RUNNER_TEMP/plamo-smoke/classes" \
+            android-app/app/src/main/java/dev/poteto/plamoselect/TranslationSegments.java \
+            scripts/TranslationSegmentsTest.java
+          java -cp "$RUNNER_TEMP/plamo-smoke/classes" \
+            TranslationSegmentsTest | tee "$RUNNER_TEMP/plamo-smoke/segments.txt"
+
+      - name: Translate both directions and the full fictional sample
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/smoke_pfml3.py "$RUNNER_TEMP/plamo-smoke/segments.txt"
 
       - name: Show model server logs on error
         if: failure()

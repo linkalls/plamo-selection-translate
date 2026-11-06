@@ -20,6 +20,12 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Keep an explicitly user-started local translation model loaded in RAM for repeated text selection translation; visible notification with stop action." />
         </service>
+        <activity
+            android:name=".SettingsActivity"
+            android:theme="@style/Theme.PLaMo.Home"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+
         <!-- Main translation workspace opens full-screen. -->
         <activity
             android:name=".HomeActivity"

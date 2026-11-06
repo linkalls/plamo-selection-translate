@@ -107,7 +107,7 @@ jobs:
           build_tools="$ANDROID_HOME/build-tools/36.0.0"
           unsigned="android-app/app/build/outputs/apk/release/app-release-unsigned.apk"
           aligned="$RUNNER_TEMP/plamo-release-aligned.apk"
-          final="dist/PLaMo-Select-v0.5.0-release.apk"
+          final="dist/PLaMo-Select-v0.6.0-release.apk"
           "$build_tools/zipalign" -p -f 4 "$unsigned" "$aligned"
           "$build_tools/apksigner" sign \
             --ks "$RUNNER_TEMP/plamo-release.p12" \
@@ -122,8 +122,8 @@ jobs:
       - name: Upload signed APK as GitHub Actions artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PLaMo-Select-v0.5.0-release
-          path: dist/PLaMo-Select-v0.5.0-release.apk
+          name: PLaMo-Select-v0.6.0-release
+          path: dist/PLaMo-Select-v0.6.0-release.apk
           if-no-files-found: error
           retention-days: 30
 
@@ -134,12 +134,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag="v0.5.0"
-          file="dist/PLaMo-Select-v0.5.0-release.apk"
+          tag="v0.6.0"
+          file="dist/PLaMo-Select-v0.6.0-release.apk"
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" "$file" --clobber
           else
             gh release create "$tag" "$file" \
-              --title "PLaMo Select v0.5.0 (signed release APK)" \
-              --notes "v0.5.0: Mobile-optimized PLaMo Q4_0 model option, tunable 2/4 CPU inference threads, lower KV memory, and progressive streaming translations. Previous offline, popup, and RAM-residency features retained. Signed non-debug release APK, built by public GitHub Actions. Signing is one-time until persistent repository signing secrets are configured; app updates may require reinstall. Android 8+ / ARM64. PLaMo GGUF model is not included and must be imported after installation. Offline inference uses the official ggml-org/llama.cpp b12138 Android ARM64 runtime."
+              --title "PLaMo Select v0.6.0 (signed release APK)" \
+              --notes "v0.6.0: Fix selected-article truncation by sentence-based sequential translation and SSE stop validation. Restore centered floating popup with compact result. Add full settings screen for model, performance, and UX controls. Signed non-debug release APK, built by public GitHub Actions. Signing is one-time until persistent repository signing secrets are configured; app updates may require reinstall. Android 8+ / ARM64. PLaMo GGUF model is not included and must be imported after installation. Offline inference uses the official ggml-org/llama.cpp b12138 Android ARM64 runtime."
           fi

@@ -41,7 +41,7 @@ runtime. Neither the Google Translate app nor Gboard needs to be modified.
 
 ## First run / PLaMo models
 
-1. Download **PLaMo-Select-v0.5.0-release.apk** from [Releases](../../releases)
+1. Download **PLaMo-Select-v0.6.0-release.apk** from [Releases](../../releases)
    and install it.
 2. On first launch, choose **Download** to fetch PFN's PLaMo 3 Translate 0.8B
    Q4_0 GGUF (~548 MB, official mobile-oriented quantization), or select an
@@ -80,6 +80,25 @@ downloads the official Q4_0 GGUF into an ephemeral GitHub runner and checks
 English→Japanese, Japanese→English, auto-source detection and SSE streaming.
 The native test validates protocol compatibility but is **not a Pixel 7 Pro
 benchmark**: Android timing and thermal conditions differ.
+
+## Long-article robustness and settings
+
+v0.6 replaces the short, broken settings dialog with a complete full-screen
+settings page. It provides model file management, CPU threads, context budget,
+maximum generation tokens, per-segment character limit, auto-translate,
+popup placement, result font size and optional source preview.
+
+Unlike the previous "up to 1050 characters per request" implementation,
+**all text is split by sentence, paragraph, and an enforced maximum length**.
+PLaMo 3 Translate can terminate a PFML3 translation after one sentence even
+when it receives multiple sentences as one request. The UI therefore translates
+each segment in sequence and concatenates all results. An incomplete SSE stream
+or token-limit stop is reported as an error, not a successful full translation.
+
+The public smoke test compiles the production Java splitting class without an
+Android emulator, then passes the extracted segments of a fictional multiline
+article through the real PLaMo 3 GGUF using streaming. It verifies numerical
+facts from the headline and body survive the translation.
 
 ## Android build
 
