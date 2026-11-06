@@ -129,6 +129,8 @@ public final class TranslateActivity extends Activity {
             int displayWidth = getResources().getDisplayMetrics().widthPixels;
             int displayHeight = getResources().getDisplayMetrics().heightPixels;
             window.setGravity(Gravity.CENTER);
+            window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+            window.setDimAmount(0.4f);
             window.setLayout(Math.min(dp(430), displayWidth - dp(24)),
                     Math.min(dp(550), (int) (displayHeight * 0.72f)));
             window.setSoftInputMode(
