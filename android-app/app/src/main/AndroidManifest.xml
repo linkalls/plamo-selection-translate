@@ -2,13 +2,24 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- Network access is used only to communicate with the on-device inference server on 127.0.0.1. -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
     <application
         android:allowBackup="false"
         android:label="@string/app_name"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:theme="@style/Theme.PLaMo.Floating"
         android:usesCleartextTraffic="true"
         android:extractNativeLibs="true">
+        <service
+            android:name=".ModelService"
+            android:exported="false"
+            android:stopWithTask="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keep an explicitly user-started local translation model loaded in RAM for repeated text selection translation; visible notification with stop action." />
+        </service>
         <activity
             android:name=".TranslateActivity"
             android:exported="true"

@@ -4,12 +4,19 @@ import android.app.Activity;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
+import android.content.ComponentName;
+import android.content.ServiceConnection;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.IBinder;
+import android.graphics.drawable.GradientDrawable;
 import android.view.View;
+import android.view.Window;
+import android.view.WindowManager;
+import android.view.Gravity;
 import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
@@ -24,24 +31,22 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
-import java.io.BufferedWriter;
+import java.io.InputStreamReader;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.io.OutputStream;
-import java.io.OutputStreamWriter;
 import java.net.HttpURLConnection;
-import java.net.ServerSocket;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Gboardに一切変更を加えず、Android標準の「テキストを処理」から翻訳するアプリ。
@@ -56,12 +61,30 @@ public final class TranslateActivity extends Activity {
     private static final int MAX_OUTPUT_TOKENS = 1536;
     private static final String MODEL_FILENAME = "plamo-translate.gguf";
 
-    // JNIではなく読み取り専用のネイティブライブラリ領域からサーバー実行ファイルを起動する。
-    private static final String NATIVE_SERVER_FILENAME = "libplamo_server.so";
-
+    // The service, not this popup, owns llama-server and the memory-resident GGUF.
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
-    private final StringBuilder serverLog = new StringBuilder();
+    private final CountDownLatch serviceConnected = new CountDownLatch(1);
+
+    private volatile ModelService modelService;
+    private boolean boundToService;
+    private volatile int translationPort = -1;
+
+    private final ServiceConnection connection = new ServiceConnection() {
+        @Override
+        public void onServiceConnected(ComponentName name, IBinder binder) {
+            modelService = ((ModelService.LocalBinder) binder).getService();
+            serviceConnected.countDown();
+            if (modelService.isModelResident() && statusView != null && !translating) {
+                setStatus("モデル常駐中。次の翻訳は再ロード不要！");
+            }
+        }
+
+        @Override
+        public void onServiceDisconnected(ComponentName name) {
+            modelService = null;
+        }
+    };
 
     private EditText inputEdit;
     private TextView statusView;
@@ -71,9 +94,9 @@ public final class TranslateActivity extends Activity {
     private Button translateButton;
     private Button replaceButton;
     private Button copyButton;
+    private Button modelButton;
+    private Button stopModelButton;
 
-    private volatile Process serverProcess;
-    private volatile int serverPort;
     private volatile boolean destroyed;
     private volatile boolean translating;
     private boolean isProcessTextRequest;
@@ -84,8 +107,64 @@ public final class TranslateActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         buildInterface();
+        // Binding alone does not keep an idle service running; the foreground
+        // service below retains the model after this popup is dismissed.
+        boundToService = bindService(new Intent(this, ModelService.class),
+                connection, Context.BIND_AUTO_CREATE);
+        if (modelPath().isFile()) {
+            startPersistentService(ModelService.ACTION_START);
+        }
         readIncomingIntent(getIntent());
         updateModelLabel();
+        updateModelControls();
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        // A true floating Dialog-themed Activity over the originating app.
+        // No SYSTEM_ALERT_WINDOW permission and no Gboard modification needed.
+        Window window = getWindow();
+        if (window != null) {
+            int displayWidth = getResources().getDisplayMetrics().widthPixels;
+            int displayHeight = getResources().getDisplayMetrics().heightPixels;
+            window.setGravity(Gravity.CENTER);
+            window.setLayout(Math.min(dp(430), displayWidth - dp(24)),
+                    Math.min(dp(550), (int) (displayHeight * 0.72f)));
+            window.setSoftInputMode(
+                    WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN
+                    | WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        }
+    }
+
+    private void startPersistentService(String action) {
+        Intent serviceIntent = new Intent(this, ModelService.class).setAction(action);
+        try {
+            startForegroundService(serviceIntent);
+        } catch (RuntimeException error) {
+            setStatus("モデル常駐の開始に失敗：" + error.getMessage());
+        }
+    }
+
+    private void stopResidentService() {
+        ModelService current = modelService;
+        if (current != null) {
+            current.stopAndRelease();
+        } else {
+            stopService(new Intent(this, ModelService.class));
+        }
+        setStatus("モデルをRAMから解放した。次回の利用時に再ロードする。");
+    }
+
+    private int awaitResidentModelPort() throws Exception {
+        if (!serviceConnected.await(12, TimeUnit.SECONDS)) {
+            throw new IOException("モデル常駐サービスに接続できない");
+        }
+        ModelService current = modelService;
+        if (current == null) {
+            throw new IOException("モデル常駐サービスが切断された");
+        }
+        return current.awaitReadyPort();
     }
 
     @Override
@@ -93,6 +172,7 @@ public final class TranslateActivity extends Activity {
         super.onNewIntent(intent);
         setIntent(intent);
         readIncomingIntent(intent);
+        updateModelControls();
     }
 
     // Androidの標準ウィジェットだけで構成し、追加ライブラリやネットワークUIを不要にする。
@@ -100,39 +180,61 @@ public final class TranslateActivity extends Activity {
         ScrollView scroll = new ScrollView(this);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(18), dp(24), dp(18), dp(24));
+        root.setPadding(dp(16), dp(14), dp(16), dp(16));
+        GradientDrawable panel = new GradientDrawable();
+        panel.setColor(0xFFFFFFFF);
+        panel.setCornerRadius(dp(20));
+        root.setBackground(panel);
+        scroll.setFillViewport(false);
         scroll.addView(root);
 
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+
         TextView title = new TextView(this);
-        title.setText("PLaMo Select翻訳");
-        title.setTextSize(24);
+        title.setText("PLaMo 翻訳");
+        title.setTextSize(20);
         title.setTextColor(0xFF15334D);
         title.setTypeface(null, 1);
-        root.addView(title);
+        header.addView(title, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
+        Button close = new Button(this);
+        close.setText("✕");
+        close.setContentDescription("ポップアップを閉じる");
+        close.setOnClickListener(v -> finish());
+        header.addView(close);
+        root.addView(header);
 
         TextView subtitle = new TextView(this);
-        subtitle.setText("Gboardはそのまま。文章を選択 → ⋮ → PLaMo Select翻訳。\n推論は端末内だけで実行するよ。ネット接続は不要。");
-        subtitle.setTextSize(14);
-        root.addView(subtitle, marginTop(12));
+        subtitle.setText("選択した文章を端末内で翻訳。モデルは次回も保持するよ。");
+        subtitle.setTextSize(12);
+        root.addView(subtitle, marginTop(4));
 
         modelView = new TextView(this);
         modelView.setTextSize(14);
-        root.addView(modelView, marginTop(20));
+        root.addView(modelView, marginTop(7));
 
-        Button modelButton = new Button(this);
-        modelButton.setText("GGUFモデルを選択・取り込み");
+        modelButton = new Button(this);
+        modelButton.setText("モデルを取り込む・変更");
         modelButton.setOnClickListener(v -> openModelPicker());
-        root.addView(modelButton, marginTop(8));
+        root.addView(modelButton, marginTop(3));
+
+        stopModelButton = new Button(this);
+        stopModelButton.setText("常駐を停止してRAMを解放");
+        stopModelButton.setOnClickListener(v -> stopResidentService());
+        root.addView(stopModelButton, marginTop(1));
 
         TextView inputTitle = new TextView(this);
         inputTitle.setText("翻訳する文章");
         inputTitle.setTextSize(16);
-        root.addView(inputTitle, marginTop(18));
+        root.addView(inputTitle, marginTop(5));
 
         inputEdit = new EditText(this);
         inputEdit.setTextSize(15);
-        inputEdit.setMinLines(4);
-        inputEdit.setMaxLines(10);
+        inputEdit.setMinLines(2);
+        inputEdit.setMaxLines(5);
         inputEdit.setGravity(android.view.Gravity.TOP);
         inputEdit.setHint("ここに文章を貼り付けてもOK。選択メニューから呼び出せば自動入力される。 ");
         inputEdit.setInputType(android.text.InputType.TYPE_CLASS_TEXT
@@ -165,14 +267,14 @@ public final class TranslateActivity extends Activity {
         TextView resultTitle = new TextView(this);
         resultTitle.setText("翻訳結果");
         resultTitle.setTextSize(16);
-        root.addView(resultTitle, marginTop(22));
+        root.addView(resultTitle, marginTop(8));
 
         translatedView = new TextView(this);
         translatedView.setTextIsSelectable(true);
         translatedView.setTextSize(16);
         translatedView.setPadding(dp(10), dp(13), dp(10), dp(13));
         translatedView.setBackgroundColor(0xFFEAF3F6);
-        translatedView.setMinHeight(dp(85));
+        translatedView.setMinHeight(dp(45));
         root.addView(translatedView, marginTop(8));
 
         replaceButton = new Button(this);
@@ -192,7 +294,7 @@ public final class TranslateActivity extends Activity {
                 "結果は編集可能なテキスト欄なら置換できる。" +
                 "閲覧のみの文章では置換できないのでコピーしてね。");
         footnote.setTextSize(12);
-        root.addView(footnote, marginTop(16));
+        root.addView(footnote, marginTop(5));
 
         setContentView(scroll);
     }
@@ -212,6 +314,9 @@ public final class TranslateActivity extends Activity {
     private void readIncomingIntent(Intent intent) {
         isProcessTextRequest = Intent.ACTION_PROCESS_TEXT.equals(intent.getAction());
         isReadOnlySelection = intent.getBooleanExtra(Intent.EXTRA_PROCESS_TEXT_READONLY, false);
+        if (isProcessTextRequest && modelPath().isFile()) {
+            startPersistentService(ModelService.ACTION_START);
+        }
         CharSequence selected = intent.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT);
         if (isProcessTextRequest && selected != null) {
             inputEdit.setText(selected);
@@ -239,6 +344,14 @@ public final class TranslateActivity extends Activity {
         } else {
             modelView.setText("モデル：未設定。PLaMo GGUFを先に選んでね。");
         }
+    }
+
+    private void updateModelControls() {
+        // Keep the context-menu popup compact; settings remain in the launcher.
+        boolean compact = isProcessTextRequest && modelPath().isFile();
+        modelButton.setVisibility(compact ? View.GONE : View.VISIBLE);
+        stopModelButton.setVisibility(compact ? View.GONE : View.VISIBLE);
+        modelView.setVisibility(compact ? View.GONE : View.VISIBLE);
     }
 
     private void openModelPicker() {
@@ -299,12 +412,21 @@ public final class TranslateActivity extends Activity {
                 }
                 // コピー完了後の置換のみ許可し、途中の壊れたモデルを使わない。
                 File current = modelPath();
-                stopServer();
                 java.nio.file.Files.move(temporary.toPath(), current.toPath(),
                         java.nio.file.StandardCopyOption.REPLACE_EXISTING);
                 mainHandler.post(() -> {
                     updateModelLabel();
-                    setStatus("モデル取り込み完了！完全オフラインで翻訳できるよ。");
+                    updateModelControls();
+                    // Only changing/importing the GGUF reloads the native server.
+                    // Reopening a popup never causes a model reload.
+                    ModelService currentService = modelService;
+                    if (currentService != null) {
+                        currentService.requestModelReload();
+                        startPersistentService(ModelService.ACTION_START);
+                    } else {
+                        startPersistentService(ModelService.ACTION_RELOAD);
+                    }
+                    setStatus("モデルを登録した。常駐ロード開始中…");
                     translateButton.setEnabled(true);
                     if (isProcessTextRequest && inputEdit.length() > 0) {
                         startTranslation();
@@ -334,6 +456,13 @@ public final class TranslateActivity extends Activity {
             return;
         }
 
+        // Restart only if the user stopped the service or Android killed it.
+        ModelService activeModel = modelService;
+        if (activeModel != null) {
+            activeModel.resumeForUserAction();
+        }
+        startPersistentService(ModelService.ACTION_START);
+
         int mode = directionSpinner.getSelectedItemPosition();
         final String targetLanguage = mode == 1 ? "ja" : mode == 2 ? "en" : inferTarget(source);
         final List<String> chunks = splitIntoChunks(source, CHUNK_LENGTH);
@@ -348,7 +477,7 @@ public final class TranslateActivity extends Activity {
 
         executor.execute(() -> {
             try {
-                ensureServerStarted();
+                translationPort = awaitResidentModelPort();
                 StringBuilder translated = new StringBuilder();
                 for (int index = 0; index < chunks.size(); index++) {
                     if (Thread.currentThread().isInterrupted() || destroyed) {
@@ -378,12 +507,8 @@ public final class TranslateActivity extends Activity {
                 });
             } catch (Exception error) {
                 String details = error.getMessage();
-                String logs;
-                synchronized (serverLog) {
-                    logs = serverLog.substring(Math.max(0, serverLog.length() - 750));
-                }
                 mainHandler.post(() -> {
-                    setStatus("翻訳エラー：" + details + "\n" + logs);
+                    setStatus("翻訳エラー：" + details);
                     translateButton.setEnabled(true);
                 });
             } finally {
@@ -449,102 +574,9 @@ public final class TranslateActivity extends Activity {
         return chunks;
     }
 
-    // localhostだけで待ち受けるサーバーを起動。起動済みなら再利用する。
-    private synchronized void ensureServerStarted() throws Exception {
-        if (serverProcess != null && serverProcess.isAlive() && isServerHealthy()) {
-            return;
-        }
-        stopServer();
-        File nativeDir = new File(getApplicationInfo().nativeLibraryDir);
-        File executable = new File(nativeDir, NATIVE_SERVER_FILENAME);
-        if (!executable.isFile()) {
-            throw new IOException("Android用llama-serverがAPKに見つからない：" + executable);
-        }
-        if (!executable.canExecute()) {
-            throw new IOException("ネイティブサーバーの実行権限がない：" + executable);
-        }
-        // 他アプリとポートが衝突しにくいよう、OSが空きポートを選択。
-        try (ServerSocket socket = new ServerSocket(0)) {
-            serverPort = socket.getLocalPort();
-        }
-        List<String> command = new ArrayList<>();
-        command.add(executable.getAbsolutePath());
-        command.add("-m");
-        command.add(modelPath().getAbsolutePath());
-        command.add("--host");
-        command.add("127.0.0.1");
-        command.add("--port");
-        command.add(Integer.toString(serverPort));
-        command.add("-c");
-        command.add("4096");
-        command.add("-t");
-        command.add("4");
-        command.add("-ngl");
-        command.add("0");
-        command.add("-np");
-        command.add("1");
-        command.add("--no-prefill-assistant");
-        ProcessBuilder processBuilder = new ProcessBuilder(command);
-        processBuilder.redirectErrorStream(true);
-        processBuilder.environment().put("LD_LIBRARY_PATH", nativeDir.getAbsolutePath());
-        synchronized (serverLog) {
-            serverLog.setLength(0);
-        }
-        serverProcess = processBuilder.start();
-        Process capturedProcess = serverProcess;
-        Thread collector = new Thread(() -> readServerLogs(capturedProcess), "plamo-native-logs");
-        collector.setDaemon(true);
-        collector.start();
-        long deadline = System.currentTimeMillis() + 100_000L;
-        while (System.currentTimeMillis() < deadline && !destroyed) {
-            if (!capturedProcess.isAlive()) {
-                throw new IOException("推論サーバーが停止した：終了コード " + capturedProcess.exitValue());
-            }
-            if (isServerHealthy()) {
-                return;
-            }
-            Thread.sleep(800);
-        }
-        throw new IOException("推論サーバー起動がタイムアウトした");
-    }
-
-    private void readServerLogs(Process process) {
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(
-                process.getInputStream(), StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                synchronized (serverLog) {
-                    serverLog.append(line).append('\n');
-                    if (serverLog.length() > 6000) {
-                        serverLog.delete(0, serverLog.length() - 4000);
-                    }
-                }
-            }
-        } catch (IOException ignored) {
-            // サーバーの正常停止時にもストリームが閉じられるので例外は無視。
-        }
-    }
-
-    private boolean isServerHealthy() {
-        HttpURLConnection connection = null;
-        try {
-            connection = (HttpURLConnection) new URL("http://127.0.0.1:" + serverPort + "/health")
-                    .openConnection();
-            connection.setConnectTimeout(700);
-            connection.setReadTimeout(700);
-            return connection.getResponseCode() == 200;
-        } catch (IOException ignored) {
-            return false;
-        } finally {
-            if (connection != null) {
-                connection.disconnect();
-            }
-        }
-    }
-
     private String requestTranslation(String source) throws Exception {
         HttpURLConnection connection = (HttpURLConnection) new URL(
-                "http://127.0.0.1:" + serverPort + "/v1/chat/completions").openConnection();
+                "http://127.0.0.1:" + translationPort + "/v1/chat/completions").openConnection();
         try {
             connection.setRequestMethod("POST");
             connection.setDoOutput(true);
@@ -585,14 +617,6 @@ public final class TranslateActivity extends Activity {
         }
     }
 
-    private synchronized void stopServer() {
-        Process previous = serverProcess;
-        serverProcess = null;
-        if (previous != null) {
-            previous.destroy();
-        }
-    }
-
     private void replaceSelection() {
         if (translatedText.isEmpty()) {
             return;
@@ -625,7 +649,11 @@ public final class TranslateActivity extends Activity {
     protected void onDestroy() {
         destroyed = true;
         executor.shutdownNow();
-        stopServer();
+        if (boundToService) {
+            unbindService(connection);
+            boundToService = false;
+        }
+        // Deliberately do not stop ModelService: the next popup reuses GGUF in RAM.
         super.onDestroy();
     }
 }

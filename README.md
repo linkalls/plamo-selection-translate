@@ -9,12 +9,16 @@ three-dot menu and choose **PLaMo Select翻訳**.
 - Android ACTION_PROCESS_TEXT integration for highlighted text.
 - Japanese / English translation, automatic direction detection and manual override.
 - Chunking for long text, offline llama.cpp inference, copy and replace.
+- Floating dialog popup above the source app (without overlay permission).
+- A user-controlled Android foreground service keeps the model loaded between
+  popup openings; stop it from the notification or launcher's stop button.
+  Android may still terminate it under memory pressure or after reboot.
 - The PLaMo GGUF model is **not** shipped in the APK. Import your own GGUF from the Android file picker.
 - The inference server binds to loopback (127.0.0.1) only.
 
 ## Install
 
-Download **PLaMo-Select-v0.1.0-release.apk** from the public
+Download **PLaMo-Select-v0.2.0-release.apk** from the public
 [Releases](../../releases) page (not a debug build).
 Install the APK, open it and import a compatible PLaMo GGUF file.
 Then select text in another app and use Android's text processing action.
