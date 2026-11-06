@@ -1,336 +1,590 @@
 package dev.poteto.plamoselect;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
-import android.content.Context;
 import android.content.ComponentName;
-import android.content.ServiceConnection;
+import android.content.Context;
 import android.content.Intent;
+import android.content.ServiceConnection;
+import android.content.res.ColorStateList;
+import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.Drawable;
+import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.RippleDrawable;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
-import android.os.Looper;
 import android.os.IBinder;
-import android.graphics.drawable.GradientDrawable;
+import android.os.Looper;
+import android.provider.OpenableColumns;
+import android.database.Cursor;
+import android.speech.tts.TextToSpeech;
+import android.text.Editable;
+import android.text.InputType;
+import android.text.TextWatcher;
+import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
-import android.view.Gravity;
-import android.view.ViewGroup;
-import android.widget.ArrayAdapter;
-import android.widget.Button;
-import android.widget.EditText;
+import android.view.inputmethod.InputMethodManager;
+import android.widget.ImageButton;
 import android.widget.LinearLayout;
+import android.widget.PopupMenu;
+import android.widget.ProgressBar;
 import android.widget.ScrollView;
-import android.widget.Spinner;
 import android.widget.TextView;
+import android.widget.EditText;
 import android.widget.Toast;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedReader;
-import java.io.InputStreamReader;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Gboardに一切変更を加えず、Android標準の「テキストを処理」から翻訳するアプリ。
+ * A translation-first Material-inspired Android UI.
  *
- * 推論サーバーは、このAPKに同梱した公式llama.cppのAndroid ARM64バイナリ。
- * サーバーは127.0.0.1にしかバインドしないため、文章を外部送信しない。
- * GGUFは初回にユーザーがファイルピッカーから選び、専用領域にコピーする。
+ * - PROCESS_TEXT: a floating, accessible, two-card popup above the source app.
+ * - Launcher: the same UI as a full-screen translation workspace.
+ * - One action to translate selected text; no clipboard/overlay permission.
+ * - The model belongs to ModelService, not to this short-lived Activity.
+ * - Every translated byte is sent only to localhost (127.0.0.1).
+ *
+ * Implementation intentionally uses platform Android widgets rather than a
+ * WebView, avoiding external JavaScript, fonts, telemetry, and network APIs.
  */
-public final class TranslateActivity extends Activity {
+public class TranslateActivity extends Activity {
     private static final int REQUEST_MODEL = 2307;
     private static final int CHUNK_LENGTH = 1050;
     private static final int MAX_OUTPUT_TOKENS = 1536;
     private static final String MODEL_FILENAME = "plamo-translate.gguf";
 
-    // The service, not this popup, owns llama-server and the memory-resident GGUF.
+    private static final int BLUE = 0xFF0B57D0;
+    private static final int BLUE_LIGHT = 0xFFDCEBFE;
+    private static final int BLUE_DARK = 0xFF102A56;
+    private static final int BACKGROUND = 0xFFF7F9FC;
+    private static final int CARD = 0xFFFFFFFF;
+    private static final int INK = 0xFF1D1E20;
+    private static final int MUTED = 0xFF65717F;
+    private static final int STROKE = 0xFFE1E6EF;
+
+    // mode 0: source auto-detect, mode 1: English to Japanese,
+    // mode 2: Japanese to English.
+    private volatile int directionMode = 0;
+    private boolean suppressTextChanges;
+    private boolean isProcessTextRequest;
+    private boolean isReadOnlySelection;
+    private volatile boolean changingModel;
+    private volatile boolean destroyed;
+    private volatile int translationPort = -1;
+    private volatile HttpURLConnection activeRequest;
+    private final AtomicInteger latestRequest = new AtomicInteger();
+
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final CountDownLatch serviceConnected = new CountDownLatch(1);
-
-    private volatile ModelService modelService;
     private boolean boundToService;
-    private volatile int translationPort = -1;
+    private volatile ModelService modelService;
+
+    private ScrollView scrollView;
+    private EditText sourceEdit;
+    private TextView targetText;
+    private TextView sourceLanguageChip;
+    private TextView targetLanguageChip;
+    private TextView statusText;
+    private TextView modelStateText;
+    private TextView characterCount;
+    private TextView translateAction;
+    private TextView replaceAction;
+    private TextView pasteAction;
+    private ImageButton copyAction;
+    private ImageButton shareAction;
+    private ImageButton speakAction;
+    private ProgressBar progress;
+    private View resultActionRow;
+
+    private String translatedText = "";
+    private String lastTarget = "ja";
+    private TextToSpeech tts;
+    private boolean ttsReady;
+    private Runnable debounce;
 
     private final ServiceConnection connection = new ServiceConnection() {
         @Override
-        public void onServiceConnected(ComponentName name, IBinder binder) {
+        public void onServiceConnected(ComponentName componentName, IBinder binder) {
             modelService = ((ModelService.LocalBinder) binder).getService();
             serviceConnected.countDown();
-            if (modelService.isModelResident() && statusView != null && !translating) {
-                setStatus("モデル常駐中。次の翻訳は再ロード不要！");
+            if (!destroyed && modelService.isModelResident()) {
+                setStatus("モデル準備完了・オフライン", false);
             }
         }
 
         @Override
-        public void onServiceDisconnected(ComponentName name) {
+        public void onServiceDisconnected(ComponentName componentName) {
             modelService = null;
         }
     };
 
-    private EditText inputEdit;
-    private TextView statusView;
-    private TextView modelView;
-    private TextView translatedView;
-    private Spinner directionSpinner;
-    private Button translateButton;
-    private Button replaceButton;
-    private Button copyButton;
-    private Button modelButton;
-    private Button stopModelButton;
-
-    private volatile boolean destroyed;
-    private volatile boolean translating;
-    private boolean isProcessTextRequest;
-    private boolean isReadOnlySelection;
-    private String translatedText = "";
+    protected boolean isHomeScreen() {
+        return false;
+    }
 
     @Override
-    protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
+    protected void onCreate(Bundle state) {
+        super.onCreate(state);
+
+        // On phone hardware, launcher and Android text-selection are separate
+        // entry points. Text selection always starts in a small popup.
+        isProcessTextRequest = Intent.ACTION_PROCESS_TEXT.equals(getIntent().getAction());
+        isReadOnlySelection = getIntent().getBooleanExtra(
+                Intent.EXTRA_PROCESS_TEXT_READONLY, false);
+
         buildInterface();
-        // Binding alone does not keep an idle service running; the foreground
-        // service below retains the model after this popup is dismissed.
         boundToService = bindService(new Intent(this, ModelService.class),
                 connection, Context.BIND_AUTO_CREATE);
+
         if (modelPath().isFile()) {
             startPersistentService(ModelService.ACTION_START);
         }
         readIncomingIntent(getIntent());
-        updateModelLabel();
-        updateModelControls();
+
+        // One-time setup, similar to choosing an offline language pack in
+        // Google Translate. Never download hundreds of MB without consent.
+        if (!modelPath().isFile() && state == null) {
+            mainHandler.postDelayed(this::showModelSetup, 400);
+        }
+
+        tts = new TextToSpeech(getApplicationContext(), status -> {
+            ttsReady = status == TextToSpeech.SUCCESS;
+        });
     }
 
     @Override
     protected void onStart() {
         super.onStart();
-        // A true floating Dialog-themed Activity over the originating app.
-        // No SYSTEM_ALERT_WINDOW permission and no Gboard modification needed.
         Window window = getWindow();
-        if (window != null) {
-            int displayWidth = getResources().getDisplayMetrics().widthPixels;
-            int displayHeight = getResources().getDisplayMetrics().heightPixels;
+        if (window == null) {
+            return;
+        }
+        if (isHomeScreen()) {
+            // The main app uses the whole screen; the source app remains behind
+            // only for the selection popup.
+            window.setStatusBarColor(BACKGROUND);
+            window.setNavigationBarColor(BACKGROUND);
+            window.getDecorView().setSystemUiVisibility(
+                    View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR
+                    | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
+            window.setSoftInputMode(
+                    WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+                    | WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
+        } else {
+            int width = getResources().getDisplayMetrics().widthPixels;
+            int height = getResources().getDisplayMetrics().heightPixels;
             window.setGravity(Gravity.CENTER);
             window.addFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND);
-            window.setDimAmount(0.4f);
-            window.setLayout(Math.min(dp(430), displayWidth - dp(24)),
-                    Math.min(dp(550), (int) (displayHeight * 0.72f)));
+            window.setDimAmount(0.35f);
+            window.setLayout(Math.min(dp(440), width - dp(24)),
+                    Math.min(dp(625), (int) (height * 0.82f)));
             window.setSoftInputMode(
-                    WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN
-                    | WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+                    WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+                    | WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN);
         }
-    }
-
-    private void startPersistentService(String action) {
-        Intent serviceIntent = new Intent(this, ModelService.class).setAction(action);
-        try {
-            startForegroundService(serviceIntent);
-        } catch (RuntimeException error) {
-            setStatus("モデル常駐の開始に失敗：" + error.getMessage());
-        }
-    }
-
-    private void stopResidentService() {
-        ModelService current = modelService;
-        if (current != null) {
-            current.stopAndRelease();
-        } else {
-            stopService(new Intent(this, ModelService.class));
-        }
-        setStatus("モデルをRAMから解放した。次回の利用時に再ロードする。");
-    }
-
-    private int awaitResidentModelPort() throws Exception {
-        if (!serviceConnected.await(12, TimeUnit.SECONDS)) {
-            throw new IOException("モデル常駐サービスに接続できない");
-        }
-        ModelService current = modelService;
-        if (current == null) {
-            throw new IOException("モデル常駐サービスが切断された");
-        }
-        return current.awaitReadyPort();
     }
 
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
+        isProcessTextRequest = Intent.ACTION_PROCESS_TEXT.equals(intent.getAction());
+        isReadOnlySelection = intent.getBooleanExtra(
+                Intent.EXTRA_PROCESS_TEXT_READONLY, false);
         readIncomingIntent(intent);
-        updateModelControls();
+        updateActionState();
     }
 
-    // Androidの標準ウィジェットだけで構成し、追加ライブラリやネットワークUIを不要にする。
     private void buildInterface() {
-        ScrollView scroll = new ScrollView(this);
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(16), dp(14), dp(16), dp(16));
-        GradientDrawable panel = new GradientDrawable();
-        panel.setColor(0xFFFFFFFF);
-        panel.setCornerRadius(dp(20));
-        root.setBackground(panel);
-        scroll.setFillViewport(false);
-        scroll.addView(root);
+        // All dimensions are in dp and work down to compact screens.
+        scrollView = new ScrollView(this);
+        scrollView.setFillViewport(true);
+        scrollView.setVerticalScrollBarEnabled(false);
+        scrollView.setClipToPadding(false);
+        scrollView.setBackgroundColor(isHomeScreen() ? BACKGROUND : Color.TRANSPARENT);
 
-        LinearLayout header = new LinearLayout(this);
-        header.setOrientation(LinearLayout.HORIZONTAL);
-        header.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout outer = vertical();
+        outer.setPadding(dp(13), dp(isHomeScreen() ? 26 : 11),
+                dp(13), dp(14));
+        scrollView.addView(outer);
 
-        TextView title = new TextView(this);
-        title.setText("PLaMo 翻訳");
-        title.setTextSize(20);
-        title.setTextColor(0xFF15334D);
-        title.setTypeface(null, 1);
-        header.addView(title, new LinearLayout.LayoutParams(
+        LinearLayout shell = vertical();
+        shell.setPadding(dp(isHomeScreen() ? 18 : 10),
+                dp(14), dp(isHomeScreen() ? 18 : 10), dp(18));
+        shell.setBackground(round(CARD, isHomeScreen() ? 28 : 24, STROKE, 0));
+        if (isHomeScreen()) {
+            shell.setElevation(dp(2));
+        }
+        outer.addView(shell, fillWrap());
+
+        buildHeader(shell);
+        buildLanguageSelector(shell);
+        buildSourceCard(shell);
+        buildTranslationCard(shell);
+        buildFooter(shell);
+        setContentView(scrollView);
+
+        updateLanguageLabels();
+        updateActionState();
+    }
+
+    private void buildHeader(LinearLayout root) {
+        LinearLayout header = horizontal(Gravity.CENTER_VERTICAL);
+        header.setPadding(dp(6), 0, dp(3), dp(2));
+
+        TextView logo = label("P", 17, Color.WHITE, true);
+        logo.setGravity(Gravity.CENTER);
+        logo.setBackground(round(BLUE, 14, BLUE, 0));
+        LinearLayout.LayoutParams logoParams = new LinearLayout.LayoutParams(dp(38), dp(38));
+        header.addView(logo, logoParams);
+
+        LinearLayout titleBlock = vertical();
+        titleBlock.setPadding(dp(10), 0, 0, 0);
+        TextView title = label("PLaMo 翻訳", 19, INK, true);
+        titleBlock.addView(title);
+        TextView byline = label("ON-DEVICE TRANSLATION", 9, MUTED, false);
+        byline.setLetterSpacing(0.12f);
+        titleBlock.addView(byline, marginTop(1));
+        header.addView(titleBlock, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
+        ImageButton settingsButton = icon(R.drawable.ic_plamo_settings,
+                "モデル・翻訳設定", () -> openSettings(), MUTED, 44);
+        header.addView(settingsButton, sized(44,44));
+
+        if (!isHomeScreen()) {
+            ImageButton closeButton = icon(R.drawable.ic_plamo_close,
+                    "翻訳ウィンドウを閉じる", this::finish, MUTED, 44);
+            header.addView(closeButton, sized(44,44));
+        }
+        root.addView(header, marginBottom(12));
+    }
+
+    private void buildLanguageSelector(LinearLayout root) {
+        LinearLayout selector = horizontal(Gravity.CENTER_VERTICAL);
+        selector.setPadding(dp(2), 0, dp(2), 0);
+
+        sourceLanguageChip = chip("言語を検出", BLUE_DARK, 0xFFF1F5FB);
+        sourceLanguageChip.setOnClickListener(this::showSourceLanguageMenu);
+        selector.addView(sourceLanguageChip, new LinearLayout.LayoutParams(
+                0, dp(45), 1));
+
+        ImageButton swap = icon(R.drawable.ic_plamo_swap,
+                "翻訳方向を入れ替える", this::swapLanguages, BLUE, 44);
+        LinearLayout.LayoutParams swapParams = sized(44, 44);
+        swapParams.setMargins(dp(3), 0, dp(3), 0);
+        selector.addView(swap, swapParams);
+
+        targetLanguageChip = chip("日本語", BLUE, BLUE_LIGHT);
+        targetLanguageChip.setOnClickListener(this::showTargetLanguageMenu);
+        selector.addView(targetLanguageChip, new LinearLayout.LayoutParams(
+                0, dp(45), 1));
+
+        root.addView(selector, marginBottom(13));
+    }
+
+    private void buildSourceCard(LinearLayout root) {
+        LinearLayout container = vertical();
+        container.setPadding(dp(16), dp(12), dp(16), dp(10));
+        container.setBackground(round(CARD, 22, STROKE, 1));
+
+        LinearLayout labelRow = horizontal(Gravity.CENTER_VERTICAL);
+        TextView label = label("原文", 12, MUTED, true);
+        labelRow.addView(label, new LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
 
-        Button close = new Button(this);
-        close.setText("✕");
-        close.setContentDescription("ポップアップを閉じる");
-        close.setOnClickListener(v -> finish());
-        header.addView(close);
-        root.addView(header);
+        ImageButton clear = icon(R.drawable.ic_plamo_close,
+                "入力をすべて消去", () -> sourceEdit.setText(""), MUTED, 35);
+        labelRow.addView(clear, sized(35,35));
+        container.addView(labelRow);
 
-        TextView subtitle = new TextView(this);
-        subtitle.setText("選択した文章を端末内で翻訳。モデルは次回も保持するよ。");
-        subtitle.setTextSize(12);
-        root.addView(subtitle, marginTop(4));
+        sourceEdit = new EditText(this);
+        sourceEdit.setTextSize(17);
+        sourceEdit.setTextColor(INK);
+        sourceEdit.setHintTextColor(0xFF9AA3AE);
+        sourceEdit.setHint("翻訳するテキストを入力");
+        sourceEdit.setInputType(InputType.TYPE_CLASS_TEXT
+                | InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
+        sourceEdit.setBackgroundColor(Color.TRANSPARENT);
+        sourceEdit.setGravity(Gravity.TOP | Gravity.START);
+        sourceEdit.setMinLines(isHomeScreen() ? 5 : 3);
+        sourceEdit.setMaxLines(isHomeScreen() ? 12 : 7);
+        sourceEdit.setPadding(0, dp(8), 0, dp(10));
+        sourceEdit.setSelectAllOnFocus(false);
+        sourceEdit.setSingleLine(false);
 
-        modelView = new TextView(this);
-        modelView.setTextSize(14);
-        root.addView(modelView, marginTop(7));
+        sourceEdit.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence text, int start,
+                    int count, int after) {}
 
-        modelButton = new Button(this);
-        modelButton.setText("モデルを取り込む・変更");
-        modelButton.setOnClickListener(v -> openModelPicker());
-        root.addView(modelButton, marginTop(3));
+            @Override public void onTextChanged(CharSequence text, int start,
+                    int before, int count) {
+                if (!suppressTextChanges) {
+                    onSourceChanged(text.toString());
+                }
+            }
 
-        stopModelButton = new Button(this);
-        stopModelButton.setText("常駐を停止してRAMを解放");
-        stopModelButton.setOnClickListener(v -> stopResidentService());
-        root.addView(stopModelButton, marginTop(1));
+            @Override public void afterTextChanged(Editable text) {}
+        });
+        container.addView(sourceEdit, fillWrap());
 
-        TextView inputTitle = new TextView(this);
-        inputTitle.setText("翻訳する文章");
-        inputTitle.setTextSize(16);
-        root.addView(inputTitle, marginTop(5));
-
-        inputEdit = new EditText(this);
-        inputEdit.setTextSize(15);
-        inputEdit.setMinLines(2);
-        inputEdit.setMaxLines(5);
-        inputEdit.setGravity(android.view.Gravity.TOP);
-        inputEdit.setHint("ここに文章を貼り付けてもOK。選択メニューから呼び出せば自動入力される。 ");
-        inputEdit.setInputType(android.text.InputType.TYPE_CLASS_TEXT
-                | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE);
-        root.addView(inputEdit, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-
-        directionSpinner = new Spinner(this);
-        String[] directions = {
-                "自動判定（推奨）",
-                "英語 → 日本語",
-                "日本語 → 英語"
-        };
-        ArrayAdapter<String> adapter = new ArrayAdapter<>(this,
-                android.R.layout.simple_spinner_item, directions);
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        directionSpinner.setAdapter(adapter);
-        root.addView(directionSpinner, marginTop(7));
-
-        translateButton = new Button(this);
-        translateButton.setText("🔁 オフライン翻訳");
-        translateButton.setOnClickListener(v -> startTranslation());
-        root.addView(translateButton, marginTop(8));
-
-        statusView = new TextView(this);
-        statusView.setText("GGUFを取り込んでから文章を翻訳できるよ。");
-        statusView.setTextSize(14);
-        root.addView(statusView, marginTop(12));
-
-        TextView resultTitle = new TextView(this);
-        resultTitle.setText("翻訳結果");
-        resultTitle.setTextSize(16);
-        root.addView(resultTitle, marginTop(8));
-
-        translatedView = new TextView(this);
-        translatedView.setTextIsSelectable(true);
-        translatedView.setTextSize(16);
-        translatedView.setPadding(dp(10), dp(13), dp(10), dp(13));
-        translatedView.setBackgroundColor(0xFFEAF3F6);
-        translatedView.setMinHeight(dp(45));
-        root.addView(translatedView, marginTop(8));
-
-        replaceButton = new Button(this);
-        replaceButton.setText("選択した文章を翻訳結果で置換");
-        replaceButton.setEnabled(false);
-        replaceButton.setOnClickListener(v -> replaceSelection());
-        root.addView(replaceButton, marginTop(10));
-
-        copyButton = new Button(this);
-        copyButton.setText("翻訳結果をコピー");
-        copyButton.setEnabled(false);
-        copyButton.setOnClickListener(v -> copyTranslation());
-        root.addView(copyButton);
-
-        TextView footnote = new TextView(this);
-        footnote.setText("長文は約1,050文字ずつ自動分割して翻訳する。" +
-                "結果は編集可能なテキスト欄なら置換できる。" +
-                "閲覧のみの文章では置換できないのでコピーしてね。");
-        footnote.setTextSize(12);
-        root.addView(footnote, marginTop(5));
-
-        setContentView(scroll);
-    }
-
-    private LinearLayout.LayoutParams marginTop(int dip) {
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        p.topMargin = dp(dip);
-        return p;
-    }
-
-    private int dp(int value) {
-        return Math.round(value * getResources().getDisplayMetrics().density);
-    }
-
-    // ACTION_PROCESS_TEXTのテキストは呼び出し元アプリの選択領域から取得する。
-    private void readIncomingIntent(Intent intent) {
-        isProcessTextRequest = Intent.ACTION_PROCESS_TEXT.equals(intent.getAction());
-        isReadOnlySelection = intent.getBooleanExtra(Intent.EXTRA_PROCESS_TEXT_READONLY, false);
-        if (isProcessTextRequest && modelPath().isFile()) {
-            startPersistentService(ModelService.ACTION_START);
+        LinearLayout tools = horizontal(Gravity.CENTER_VERTICAL);
+        pasteAction = label("貼り付け", 13, BLUE, true);
+        pasteAction.setPadding(dp(7), dp(8), dp(10), dp(8));
+        pasteAction.setCompoundDrawablePadding(dp(6));
+        Drawable pasteIcon = getDrawable(R.drawable.ic_plamo_paste);
+        if (pasteIcon != null) {
+            pasteIcon = pasteIcon.mutate();
+            pasteIcon.setTint(BLUE);
+            pasteIcon.setBounds(0, 0, dp(17), dp(17));
+            pasteAction.setCompoundDrawables(pasteIcon, null, null, null);
         }
-        CharSequence selected = intent.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT);
-        if (isProcessTextRequest && selected != null) {
-            inputEdit.setText(selected);
+        pasteAction.setOnClickListener(v -> pasteFromClipboard());
+        tools.addView(pasteAction, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
+        characterCount = label("0文字", 11, MUTED, false);
+        tools.addView(characterCount);
+        container.addView(tools);
+
+        root.addView(container, marginBottom(12));
+    }
+
+    private void buildTranslationCard(LinearLayout root) {
+        LinearLayout translatedCard = vertical();
+        translatedCard.setPadding(dp(16), dp(14), dp(16), dp(14));
+        translatedCard.setBackground(round(BLUE_LIGHT, 22, BLUE_LIGHT, 0));
+
+        LinearLayout labelRow = horizontal(Gravity.CENTER_VERTICAL);
+        TextView label = label("翻訳", 12, BLUE_DARK, true);
+        labelRow.addView(label, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
+        progress = new ProgressBar(this, null,
+                android.R.attr.progressBarStyleSmall);
+        progress.setIndeterminate(true);
+        progress.setIndeterminateTintList(ColorStateList.valueOf(BLUE));
+        progress.setVisibility(View.GONE);
+        labelRow.addView(progress, sized(19, 19));
+        translatedCard.addView(labelRow);
+
+        targetText = label("ここに翻訳結果が表示される", 19, MUTED, false);
+        targetText.setTextIsSelectable(true);
+        targetText.setGravity(Gravity.TOP | Gravity.START);
+        targetText.setPadding(0, dp(17), 0, dp(18));
+        translatedCard.addView(targetText, fillWrap());
+
+        statusText = label("端末内で翻訳・通信不要", 11, MUTED, false);
+        translatedCard.addView(statusText, marginBottom(7));
+
+        resultActionRow = horizontal(Gravity.CENTER_VERTICAL);
+        copyAction = icon(R.drawable.ic_plamo_copy,
+                "翻訳結果をコピー", this::copyTranslation, BLUE_DARK, 44);
+        ((LinearLayout) resultActionRow).addView(copyAction, sized(44,44));
+
+        shareAction = icon(R.drawable.ic_plamo_share,
+                "翻訳結果を共有", this::shareTranslation, BLUE_DARK, 44);
+        ((LinearLayout) resultActionRow).addView(shareAction, sized(44,44));
+
+        speakAction = icon(R.drawable.ic_plamo_volume,
+                "翻訳結果をオフラインで読み上げる",
+                this::speakTranslation, BLUE_DARK, 44);
+        ((LinearLayout) resultActionRow).addView(speakAction, sized(44,44));
+
+        View spacer = new View(this);
+        ((LinearLayout) resultActionRow).addView(spacer,
+                new LinearLayout.LayoutParams(0, dp(1), 1));
+
+        replaceAction = roundedButton("置換", BLUE, Color.WHITE, 13);
+        replaceAction.setOnClickListener(v -> replaceSelection());
+        LinearLayout.LayoutParams replaceParams = new LinearLayout.LayoutParams(
+                dp(94), dp(43));
+        ((LinearLayout) resultActionRow).addView(replaceAction, replaceParams);
+        translatedCard.addView(resultActionRow);
+        root.addView(translatedCard, marginBottom(13));
+    }
+
+    private void buildFooter(LinearLayout root) {
+        LinearLayout row = horizontal(Gravity.CENTER_VERTICAL);
+
+        modelStateText = label("完全オフライン", 11, MUTED, false);
+        row.addView(modelStateText, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
+        translateAction = roundedButton("翻訳する", BLUE, Color.WHITE, 13);
+        translateAction.setOnClickListener(v -> startTranslation(true));
+        row.addView(translateAction, sized(108, 42));
+        root.addView(row);
+    }
+
+    private void onSourceChanged(String text) {
+        cancelPendingTranslation();
+        characterCount.setText(text.codePointCount(0, text.length()) + "文字");
+        if (directionMode == 0) {
+            updateLanguageLabels();
+        }
+        translatedText = "";
+        targetText.setText(text.isEmpty()
+                ? "ここに翻訳結果が表示される" : "翻訳を準備中…");
+        targetText.setTextColor(MUTED);
+        setStatus("端末内で翻訳・通信不要", false);
+        updateActionState();
+
+        if (!text.trim().isEmpty() && modelPath().isFile()) {
+            // Debounce text entry so slow on-device models are not invoked on
+            // every keystroke, while the text selection path remains instant.
+            debounce = () -> startTranslation(false);
+            mainHandler.postDelayed(debounce, 750);
+        }
+    }
+
+    private void showSourceLanguageMenu(View anchor) {
+        PopupMenu menu = new PopupMenu(this, anchor);
+        menu.getMenu().add(0, 0, 0, "言語を自動検出");
+        menu.getMenu().add(0, 1, 1, "英語");
+        menu.getMenu().add(0, 2, 2, "日本語");
+        menu.setOnMenuItemClickListener(item -> {
+            directionMode = item.getItemId();
+            updateLanguageLabels();
+            if (!sourceEdit.getText().toString().trim().isEmpty()) {
+                startTranslation(true);
+            }
+            return true;
+        });
+        menu.show();
+    }
+
+    private void showTargetLanguageMenu(View anchor) {
+        PopupMenu menu = new PopupMenu(this, anchor);
+        menu.getMenu().add(0, 1, 0, "日本語");
+        menu.getMenu().add(0, 2, 1, "英語");
+        menu.setOnMenuItemClickListener(item -> {
+            directionMode = item.getItemId();
+            updateLanguageLabels();
+            if (!sourceEdit.getText().toString().trim().isEmpty()) {
+                startTranslation(true);
+            }
+            return true;
+        });
+        menu.show();
+    }
+
+    private void swapLanguages() {
+        String source = sourceEdit.getText().toString();
+        String result = translatedText;
+        String oldTarget = selectedTargetLanguage(source);
+        directionMode = oldTarget.equals("ja") ? 2 : 1;
+        lastTarget = selectedTargetLanguage(result.isEmpty() ? source : result);
+
+        // If a translation is already available, exchanging both texts gives
+        // instant Google-Translate-style feedback, without loading/inferencing.
+        if (!result.isEmpty()) {
+            cancelPendingTranslation();
+            setSourceTextSilently(result);
+            translatedText = source;
+            targetText.setText(source);
+            targetText.setTextColor(INK);
+            setStatus("言語を入れ替えた", false);
+        } else if (!source.trim().isEmpty()) {
+            startTranslation(true);
+        }
+        updateLanguageLabels();
+        updateActionState();
+    }
+
+    private void updateLanguageLabels() {
+        if (sourceLanguageChip == null || targetLanguageChip == null) return;
+
+        String src = directionMode == 0 ? "言語を検出"
+                : directionMode == 1 ? "英語" : "日本語";
+        String target = selectedTargetLanguage(
+                sourceEdit == null ? "" : sourceEdit.getText().toString());
+        sourceLanguageChip.setText(src + " ▾");
+        targetLanguageChip.setText((target.equals("ja") ? "日本語" : "英語") + " ▾");
+    }
+
+    private String selectedTargetLanguage(String text) {
+        if (directionMode == 1) return "ja";
+        if (directionMode == 2) return "en";
+        return inferTarget(text);
+    }
+
+    private String inferTarget(String text) {
+        int japanese = 0;
+        int latin = 0;
+        for (int i = 0; i < text.length();) {
+            int codePoint = text.codePointAt(i);
+            i += Character.charCount(codePoint);
+            Character.UnicodeScript script = Character.UnicodeScript.of(codePoint);
+            if (script == Character.UnicodeScript.HIRAGANA
+                    || script == Character.UnicodeScript.KATAKANA
+                    || script == Character.UnicodeScript.HAN) {
+                japanese++;
+            } else if (script == Character.UnicodeScript.LATIN
+                    && Character.isLetter(codePoint)) {
+                latin++;
+            }
+        }
+        return japanese > 0 && (latin == 0 || japanese * 3 >= latin) ? "en" : "ja";
+    }
+
+    private void setSourceTextSilently(String value) {
+        suppressTextChanges = true;
+        try {
+            sourceEdit.setText(value);
+            sourceEdit.setSelection(sourceEdit.length());
+            characterCount.setText(value.codePointCount(0, value.length()) + "文字");
+        } finally {
+            suppressTextChanges = false;
+        }
+    }
+
+    private void readIncomingIntent(Intent intent) {
+        if (intent == null) return;
+        CharSequence selection = intent.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT);
+        if (Intent.ACTION_PROCESS_TEXT.equals(intent.getAction()) && selection != null) {
+            isProcessTextRequest = true;
+            setSourceTextSilently(selection.toString());
             translatedText = "";
-            translatedView.setText("");
-            copyButton.setEnabled(false);
-            replaceButton.setEnabled(false);
+            targetText.setText("翻訳を準備中…");
+            targetText.setTextColor(MUTED);
+            updateLanguageLabels();
+            updateActionState();
+
             if (modelPath().isFile()) {
-                // 文章選択 → 翻訳を極力ワンタップに近づける。
-                startTranslation();
+                startTranslation(true);
             } else {
-                setStatus("先にGGUFを取り込んでね。文章は保持しているよ。");
+                setStatus("まず翻訳モデルを登録してね（右上の設定）", true);
             }
         }
     }
@@ -339,323 +593,726 @@ public final class TranslateActivity extends Activity {
         return new File(getFilesDir(), MODEL_FILENAME);
     }
 
-    private void updateModelLabel() {
+    private void openSettings() {
         File model = modelPath();
-        if (model.isFile() && model.length() > 20_000_000) {
-            modelView.setText("モデル：取り込み済み（" + (model.length() / 1_000_000) + " MB）");
-        } else {
-            modelView.setText("モデル：未設定。PLaMo GGUFを先に選んでね。");
+        String size = model.isFile()
+                ? (model.length() / 1_000_000) + " MB"
+                : "未登録";
+        ModelService service = modelService;
+        String modelStatus = service != null && service.isModelResident()
+                ? "メモリ常駐中" : "未起動";
+        int backend = getSharedPreferences("plamo_prefs", MODE_PRIVATE).getInt("plamo_generation", 3);
+
+        new AlertDialog.Builder(this)
+                .setTitle("PLaMo 設定")
+                .setMessage("モデル：" + size + "\n状態：" + modelStatus
+                        + "\nモデル形式：PLaMo " + backend
+                        + "\n翻訳は端末内のみで処理するよ。")
+                .setItems(new String[] {
+                        "PLaMo 3モデルをダウンロード（約570 MB）",
+                        "端末内のGGUFファイルを選択",
+                        "PLaMo 3用の翻訳形式",
+                        "PLaMo 2用の翻訳形式",
+                        "モデルを停止・RAMを解放"
+                }, (dialog, selected) -> {
+                    if (selected == 0) {
+                        confirmModelDownload();
+                    } else if (selected == 1) {
+                        openModelPicker();
+                    } else if (selected == 2 || selected == 3) {
+                        int generation = selected == 2 ? 3 : 2;
+                        getSharedPreferences("plamo_prefs", MODE_PRIVATE).edit()
+                                .putInt("plamo_generation", generation).apply();
+                        setStatus("翻訳形式を PLaMo " + generation + " に設定", false);
+                        // The server's --jinja flag differs by model family.
+                        ModelService model = modelService;
+                        if (model != null) model.requestModelReload();
+                        if (!sourceEdit.getText().toString().trim().isEmpty()) {
+                            startTranslation(true);
+                        }
+                    } else {
+                        stopResidentService();
+                    }
+                })
+                .setNegativeButton("閉じる", null)
+                .show();
+    }
+
+    private void showModelSetup() {
+        if (destroyed || modelPath().isFile()) return;
+        new AlertDialog.Builder(this)
+                .setTitle("オフライン翻訳の準備")
+                .setMessage("PLaMo 3 Translateの軽量モデルを最初に1回だけ"
+                        + "用意するよ。翻訳時は通信不要。"
+                        + "\n\n公式モデル：0.8B / Q4_K_M（約570 MB）"
+                        + "\nダウンロードするか、保存済みのGGUFを使える。")
+                .setPositiveButton("ダウンロード", (dialog, which) -> confirmModelDownload())
+                .setNeutralButton("ファイルから選択", (dialog, which) -> openModelPicker())
+                .setNegativeButton("あとで", null)
+                .show();
+    }
+
+    private void confirmModelDownload() {
+        new AlertDialog.Builder(this)
+                .setTitle("PLaMo 3モデルを入手")
+                .setMessage("Preferred Networks公式Hugging Faceから約570 MBを"
+                        + "ダウンロードして端末に保存するよ。"
+                        + "\nWi-Fi推奨・十分な空き容量が必要。"
+                        + "\nモデルにはPLaMo Community Licenseが適用される。")
+                .setPositiveButton("ダウンロード開始", (dialog, which) -> downloadOfficialModel())
+                .setNeutralButton("モデルの詳細", (dialog, which) -> {
+                    Intent browser = new Intent(Intent.ACTION_VIEW,
+                            Uri.parse("https://huggingface.co/pfnet/"
+                                    + "plamo-3-translate-0.8b-GGUF"));
+                    startActivity(browser);
+                })
+                .setNegativeButton("キャンセル", null)
+                .show();
+    }
+
+    private void downloadOfficialModel() {
+        if (changingModel) return;
+        if (getFilesDir().getUsableSpace() < 800_000_000L) {
+            setStatus("空き容量が不足している（800 MB以上推奨）", true);
+            return;
+        }
+        changingModel = true;
+        cancelPendingTranslation();
+        setStatus("公式PLaMo 3モデルをダウンロード中…", false);
+        updateActionState();
+
+        executor.execute(() -> {
+            File temporary = new File(getFilesDir(), MODEL_FILENAME + ".partial");
+            HttpURLConnection download = null;
+            try {
+                URL source = new URL("https://huggingface.co/pfnet/"
+                        + "plamo-3-translate-0.8b-GGUF/resolve/main/"
+                        + "plamo-3-translate-0.8b-Q4_K_M.gguf?download=true");
+                download = (HttpURLConnection) source.openConnection();
+                download.setConnectTimeout(20_000);
+                download.setReadTimeout(60_000);
+                download.setInstanceFollowRedirects(true);
+                download.setRequestProperty("User-Agent", "PLaMoSelectAndroid/0.3");
+                int statusCode = download.getResponseCode();
+                if (statusCode < 200 || statusCode >= 300) {
+                    throw new IOException("モデル取得HTTP " + statusCode);
+                }
+                long length = download.getContentLengthLong();
+                long transferred = 0;
+                long nextProgress = 0;
+
+                try (InputStream input = download.getInputStream();
+                        OutputStream output = new FileOutputStream(temporary)) {
+                    byte[] buffer = new byte[256 * 1024];
+                    int count;
+                    while ((count = input.read(buffer)) != -1) {
+                        if (Thread.currentThread().isInterrupted()) {
+                            throw new IOException("ダウンロードを中断した");
+                        }
+                        output.write(buffer, 0, count);
+                        transferred += count;
+                        if (transferred >= nextProgress) {
+                            long captured = transferred;
+                            nextProgress = transferred + 8_000_000L;
+                            mainHandler.post(() -> setStatus(
+                                    "ダウンロード中：" + captured / 1_000_000
+                                            + " / " + (length > 0
+                                            ? length / 1_000_000 + " MB"
+                                            : "サイズ不明"), false));
+                        }
+                    }
+                    output.flush();
+                }
+                verifyGGUF(temporary);
+                finishModelImport(temporary, 3);
+            } catch (Exception error) {
+                temporary.delete();
+                mainHandler.post(() -> {
+                    changingModel = false;
+                    setStatus("ダウンロード失敗：" + error.getMessage(), true);
+                    updateActionState();
+                });
+            } finally {
+                if (download != null) download.disconnect();
+            }
+        });
+    }
+
+    private void verifyGGUF(File file) throws IOException {
+        if (file.length() < 20_000_000) {
+            throw new IOException("GGUFのサイズが不自然に小さい");
+        }
+        try (FileInputStream reader = new FileInputStream(file)) {
+            byte[] magic = new byte[4];
+            if (reader.read(magic) != 4 || magic[0] != 'G'
+                    || magic[1] != 'G' || magic[2] != 'U' || magic[3] != 'F') {
+                throw new IOException("GGUFではないファイルだよ");
+            }
         }
     }
 
-    private void updateModelControls() {
-        // Keep the context-menu popup compact; settings remain in the launcher.
-        boolean compact = isProcessTextRequest && modelPath().isFile();
-        modelButton.setVisibility(compact ? View.GONE : View.VISIBLE);
-        stopModelButton.setVisibility(compact ? View.GONE : View.VISIBLE);
-        modelView.setVisibility(compact ? View.GONE : View.VISIBLE);
+    private void finishModelImport(File temporary, int generation) throws IOException {
+        java.nio.file.Files.move(temporary.toPath(), modelPath().toPath(),
+                java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        getSharedPreferences("plamo_prefs", MODE_PRIVATE).edit()
+                .putInt("plamo_generation", generation).apply();
+        mainHandler.post(() -> {
+            changingModel = false;
+            ModelService service = modelService;
+            if (service != null) {
+                service.requestModelReload();
+                startPersistentService(ModelService.ACTION_START);
+            } else {
+                startPersistentService(ModelService.ACTION_RELOAD);
+            }
+            setStatus("モデルを登録した。起動中…", false);
+            updateActionState();
+            if (!sourceEdit.getText().toString().trim().isEmpty()) {
+                startTranslation(true);
+            }
+        });
     }
 
     private void openModelPicker() {
-        Intent pick = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-        pick.addCategory(Intent.CATEGORY_OPENABLE);
-        pick.setType("*/*");
-        pick.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION |
-                Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
-        startActivityForResult(pick, REQUEST_MODEL);
+        Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        picker.addCategory(Intent.CATEGORY_OPENABLE);
+        picker.setType("*/*");
+        picker.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        startActivityForResult(picker, REQUEST_MODEL);
     }
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != REQUEST_MODEL || resultCode != RESULT_OK || data == null) {
+        if (requestCode != REQUEST_MODEL || resultCode != RESULT_OK
+                || data == null || data.getData() == null) {
             return;
         }
         Uri uri = data.getData();
-        if (uri == null) {
-            setStatus("ファイルを取得できなかった。");
-            return;
-        }
-        setStatus("GGUFを取り込み中。コピーが終わるまでアプリを閉じないでね。");
-        translateButton.setEnabled(false);
+        changingModel = true;
+        cancelPendingTranslation();
+        setStatus("モデルを取り込み中…", false);
+        updateActionState();
 
-        // SAFのcontent:// URIをllama.cppへ直接渡せないため、アプリ専用領域にコピーする。
+        String displayName = "";
+        try (Cursor cursor = getContentResolver().query(
+                uri, new String[]{OpenableColumns.DISPLAY_NAME},
+                null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                displayName = cursor.getString(0);
+            }
+        } catch (Exception ignored) {
+            // Filename is best effort; the GGUF content magic is authoritative.
+        }
+        String chosenName = displayName == null ? "" : displayName.toLowerCase(Locale.ROOT);
+        final int modelGeneration = chosenName.contains("plamo-2") ? 2 : 3;
+
         executor.execute(() -> {
             File temporary = new File(getFilesDir(), MODEL_FILENAME + ".partial");
             try (InputStream input = getContentResolver().openInputStream(uri);
-                 OutputStream output = new FileOutputStream(temporary)) {
-                if (input == null) {
-                    throw new IOException("コンテンツを読み込めない");
-                }
-                byte[] buffer = new byte[256 * 1024];
-                long length = 0;
+                    OutputStream output = new FileOutputStream(temporary)) {
+                if (input == null) throw new IOException("ファイルを開けない");
+                byte[] block = new byte[256 * 1024];
                 int count;
-                while ((count = input.read(buffer)) != -1) {
-                    output.write(buffer, 0, count);
-                    length += count;
-                    if ((length / (32 * 1024 * 1024)) !=
-                            ((length - count) / (32 * 1024 * 1024))) {
-                        long mb = length / 1_000_000;
-                        mainHandler.post(() -> setStatus("GGUF取り込み中：" + mb + " MB"));
+                long total = 0;
+                while ((count = input.read(block)) != -1) {
+                    if (Thread.currentThread().isInterrupted()) {
+                        throw new IOException("モデル取り込みを中断した");
+                    }
+                    output.write(block, 0, count);
+                    total += count;
+                    if (total % (32 * 1024 * 1024L) < count) {
+                        final long copied = total;
+                        mainHandler.post(() -> setStatus(
+                                "モデルを取り込み中：" + copied / 1_000_000 + " MB", false));
                     }
                 }
                 output.flush();
-
-                // 破損ZIPや別種のファイルを誤ってモデルとして登録しない。
-                if (length < 20_000_000) {
-                    throw new IOException("GGUFのサイズが不自然に小さい");
-                }
-                try (FileInputStream verify = new FileInputStream(temporary)) {
-                    byte[] magic = new byte[4];
-                    if (verify.read(magic) != 4 || magic[0] != 'G' || magic[1] != 'G'
-                            || magic[2] != 'U' || magic[3] != 'F') {
-                        throw new IOException("GGUFではないよ。ZIPを解凍してGGUFを選択してね。");
-                    }
-                }
-                // コピー完了後の置換のみ許可し、途中の壊れたモデルを使わない。
-                File current = modelPath();
-                java.nio.file.Files.move(temporary.toPath(), current.toPath(),
-                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-                mainHandler.post(() -> {
-                    updateModelLabel();
-                    updateModelControls();
-                    // Only changing/importing the GGUF reloads the native server.
-                    // Reopening a popup never causes a model reload.
-                    ModelService currentService = modelService;
-                    if (currentService != null) {
-                        currentService.requestModelReload();
-                        startPersistentService(ModelService.ACTION_START);
-                    } else {
-                        startPersistentService(ModelService.ACTION_RELOAD);
-                    }
-                    setStatus("モデルを登録した。常駐ロード開始中…");
-                    translateButton.setEnabled(true);
-                    if (isProcessTextRequest && inputEdit.length() > 0) {
-                        startTranslation();
-                    }
-                });
+                verifyGGUF(temporary);
+                finishModelImport(temporary, modelGeneration);
             } catch (Exception error) {
                 temporary.delete();
                 mainHandler.post(() -> {
-                    setStatus("モデル取り込み失敗：" + error.getMessage());
-                    translateButton.setEnabled(true);
+                    changingModel = false;
+                    setStatus("モデル取り込み失敗：" + error.getMessage(), true);
+                    updateActionState();
                 });
             }
         });
     }
 
-    private void startTranslation() {
-        if (translating) {
-            return;
+    private void stopResidentService() {
+        ModelService service = modelService;
+        if (service != null) {
+            service.stopAndRelease();
+        } else {
+            stopService(new Intent(this, ModelService.class));
         }
-        String source = inputEdit.getText().toString();
-        if (source.trim().isEmpty()) {
-            setStatus("翻訳する文章を入力してね。");
+        setStatus("メモリを解放した。次の翻訳時に再ロードする", false);
+    }
+
+    private void startPersistentService(String action) {
+        try {
+            startForegroundService(new Intent(this, ModelService.class).setAction(action));
+        } catch (RuntimeException error) {
+            setStatus("モデルサービスを開始できない：" + error.getMessage(), true);
+        }
+    }
+
+    private int awaitModelPort() throws Exception {
+        if (!serviceConnected.await(12, TimeUnit.SECONDS)) {
+            throw new IOException("翻訳サービスに接続できない");
+        }
+        ModelService service = modelService;
+        if (service == null) {
+            throw new IOException("翻訳サービスとの接続が切れた");
+        }
+        return service.awaitReadyPort();
+    }
+
+    private void cancelPendingTranslation() {
+        latestRequest.incrementAndGet();
+        if (debounce != null) {
+            mainHandler.removeCallbacks(debounce);
+            debounce = null;
+        }
+        HttpURLConnection running = activeRequest;
+        if (running != null) {
+            running.disconnect();
+        }
+        if (progress != null) progress.setVisibility(View.GONE);
+    }
+
+    private void startTranslation(boolean userInitiated) {
+        if (changingModel || destroyed) return;
+        final String original = sourceEdit.getText().toString();
+        if (original.trim().isEmpty()) {
+            if (userInitiated) setStatus("先に原文を入力してね", true);
             return;
         }
         if (!modelPath().isFile()) {
-            setStatus("先にGGUFを取り込んでね。");
+            setStatus("まずGGUFモデルを登録してね（右上の設定）", true);
             return;
         }
-
-        // Restart only if the user stopped the service or Android killed it.
-        ModelService activeModel = modelService;
-        if (activeModel != null) {
-            activeModel.resumeForUserAction();
-        }
-        startPersistentService(ModelService.ACTION_START);
-
-        int mode = directionSpinner.getSelectedItemPosition();
-        final String targetLanguage = mode == 1 ? "ja" : mode == 2 ? "en" : inferTarget(source);
-        final List<String> chunks = splitIntoChunks(source, CHUNK_LENGTH);
-        translating = true;
-        translateButton.setEnabled(false);
-        replaceButton.setEnabled(false);
-        copyButton.setEnabled(false);
+        cancelPendingTranslation();
+        final int request = latestRequest.get();
+        final String destination = selectedTargetLanguage(original);
+        final int modelGeneration = getSharedPreferences("plamo_prefs", MODE_PRIVATE).getInt("plamo_generation", 3);
+        final int capturedDirectionMode = directionMode;
+        lastTarget = destination;
         translatedText = "";
-        translatedView.setText("");
-        setStatus("翻訳を開始。" + chunks.size() + "分割・翻訳先：" +
-                (targetLanguage.equals("ja") ? "日本語" : "英語"));
+        targetText.setText("翻訳中…");
+        targetText.setTextColor(MUTED);
+        setStatus("モデルを準備中…", false);
+        progress.setVisibility(View.VISIBLE);
+        updateActionState();
+
+        // Start foreground service only when the user is looking at our app.
+        ModelService current = modelService;
+        if (current != null) current.resumeForUserAction();
+        startPersistentService(ModelService.ACTION_START);
 
         executor.execute(() -> {
             try {
-                translationPort = awaitResidentModelPort();
+                final int port = awaitModelPort();
+                translationPort = port;
+                if (isStale(request)) return;
+                final List<String> chunks = splitIntoChunks(original, CHUNK_LENGTH);
                 StringBuilder translated = new StringBuilder();
-                for (int index = 0; index < chunks.size(); index++) {
-                    if (Thread.currentThread().isInterrupted() || destroyed) {
-                        throw new InterruptedException("翻訳が中断された");
+
+                for (int i = 0; i < chunks.size(); i++) {
+                    if (isStale(request)) return;
+                    final int currentIndex = i + 1;
+                    mainHandler.post(() -> {
+                        if (!isStale(request)) setStatus("翻訳中 " + currentIndex
+                                + " / " + chunks.size(), false);
+                    });
+                    String result = callLocalTranslate(chunks.get(i), destination,
+                            modelGeneration, capturedDirectionMode);
+                    if (result.trim().isEmpty()) {
+                        throw new IOException("空の翻訳結果が返った");
                     }
-                    final int current = index + 1;
-                    mainHandler.post(() -> setStatus("翻訳中：" + current + " / " + chunks.size()));
-                    // 全文を一度だけ言語判定し、分割後の断片で誤判定しないよう方向を固定。
-                    String prefix = targetLanguage.equals("ja") ? "JA: " : "EN: ";
-                    String part = requestTranslation(prefix + chunks.get(index));
-                    if (part.trim().isEmpty()) {
-                        throw new IOException("空の翻訳結果が返った（" + current + " / " + chunks.size() + "）");
-                    }
-                    if (translated.length() > 0) {
-                        translated.append("\n\n");
-                    }
-                    translated.append(part.trim());
-                    String partial = translated.toString();
-                    mainHandler.post(() -> translatedView.setText(partial));
+                    if (isStale(request)) return;
+                    if (translated.length() > 0) translated.append("\n\n");
+                    translated.append(result.trim());
+                    final String preview = translated.toString();
+                    mainHandler.post(() -> {
+                        if (!isStale(request)) {
+                            targetText.setText(preview);
+                            targetText.setTextColor(INK);
+                        }
+                    });
                 }
-                translatedText = translated.toString();
+
                 mainHandler.post(() -> {
-                    setStatus("翻訳完了！どのアプリにもコピーできるよ。");
-                    translateButton.setEnabled(true);
-                    copyButton.setEnabled(true);
-                    replaceButton.setEnabled(isProcessTextRequest && !isReadOnlySelection);
+                    if (isStale(request)) return;
+                    translatedText = translated.toString();
+                    progress.setVisibility(View.GONE);
+                    targetText.setText(translatedText);
+                    targetText.setTextColor(INK);
+                    setStatus("オフラインで翻訳完了", false);
+                    updateActionState();
                 });
             } catch (Exception error) {
-                String details = error.getMessage();
                 mainHandler.post(() -> {
-                    setStatus("翻訳エラー：" + details);
-                    translateButton.setEnabled(true);
+                    if (isStale(request)) return;
+                    progress.setVisibility(View.GONE);
+                    targetText.setText("翻訳できなかった");
+                    targetText.setTextColor(MUTED);
+                    setStatus(error.getMessage() == null
+                            ? "翻訳エラー" : error.getMessage(), true);
+                    updateActionState();
                 });
             } finally {
-                translating = false;
+                activeRequest = null;
             }
         });
     }
 
-    /**
-     * Unicode Scriptによる簡易言語判定。記事中の「江戸」1語だけで、
-     * 英文全体が日本語扱いにならないよう文字数を比較する。
-     */
-    private String inferTarget(String content) {
-        int japanese = 0;
-        int latin = 0;
-        for (int i = 0; i < content.length(); ) {
-            int point = content.codePointAt(i);
-            i += Character.charCount(point);
-            Character.UnicodeScript script = Character.UnicodeScript.of(point);
-            if (script == Character.UnicodeScript.HIRAGANA ||
-                    script == Character.UnicodeScript.KATAKANA ||
-                    script == Character.UnicodeScript.HAN) {
-                japanese++;
-            } else if (script == Character.UnicodeScript.LATIN && Character.isLetter(point)) {
-                latin++;
-            }
-        }
-        return japanese > 0 && (latin == 0 || japanese * 3 >= latin) ? "en" : "ja";
+    private boolean isStale(int request) {
+        return destroyed || request != latestRequest.get();
     }
 
-    /**
-     * コンテキストと推論速度を抑えるため分割。句点・英語ピリオド・改行・空白を優先。
-     * Androidのテキスト選択は数千文字に達するため、一括での推論を避ける。
-     */
-    private List<String> splitIntoChunks(String input, int limit) {
+    private List<String> splitIntoChunks(String text, int limit) {
         List<String> chunks = new ArrayList<>();
         int start = 0;
-        while (start < input.length()) {
-            int end = Math.min(input.length(), start + limit);
-            if (end < input.length()) {
-                int minEnd = start + limit * 2 / 3;
-                for (int at = end - 1; at >= minEnd; at--) {
-                    char ch = input.charAt(at);
-                    if (ch == '\n' || ch == '。' || ch == '！' || ch == '？' ||
-                            ch == '.' || ch == '!' || ch == '?' || ch == ' ') {
-                        end = at + 1;
+        while (start < text.length()) {
+            int end = Math.min(text.length(), start + limit);
+            if (end < text.length()) {
+                int lowerBound = start + limit * 2 / 3;
+                for (int position = end - 1; position >= lowerBound; position--) {
+                    char ch = text.charAt(position);
+                    if (ch == '\n' || ch == '。' || ch == '.' || ch == '!' ||
+                            ch == '?' || ch == '！' || ch == '？' || ch == ' ') {
+                        end = position + 1;
                         break;
                     }
                 }
             }
-            // サロゲートペアの途中で切らない。emojiなどを壊さないための保険。
-            if (end < input.length() && end > start &&
-                    Character.isHighSurrogate(input.charAt(end - 1)) &&
-                    Character.isLowSurrogate(input.charAt(end))) {
+            if (end < text.length() && end > start
+                    && Character.isHighSurrogate(text.charAt(end - 1))
+                    && Character.isLowSurrogate(text.charAt(end))) {
                 end--;
             }
-            String candidate = input.substring(start, end).trim();
-            if (!candidate.isEmpty()) {
-                chunks.add(candidate);
-            }
+            String chunk = text.substring(start, end).trim();
+            if (!chunk.isEmpty()) chunks.add(chunk);
             start = end;
         }
         return chunks;
     }
 
-    private String requestTranslation(String source) throws Exception {
+    private String callLocalTranslate(String source, String destination,
+            int modelGeneration, int sourceDirection) throws Exception {
+        // PLaMo 3 GGUF requires --jinja and a target_lang setting in the
+        // embedded chat template. PLaMo 2 retains its original JA:/EN: mode.
         HttpURLConnection connection = (HttpURLConnection) new URL(
-                "http://127.0.0.1:" + translationPort + "/v1/chat/completions").openConnection();
+                "http://127.0.0.1:" + translationPort + "/v1/chat/completions")
+                .openConnection();
+        activeRequest = connection;
         try {
             connection.setRequestMethod("POST");
             connection.setDoOutput(true);
             connection.setConnectTimeout(3500);
             connection.setReadTimeout(240_000);
-            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            connection.setRequestProperty("Content-Type",
+                    "application/json; charset=utf-8");
+
             JSONObject request = new JSONObject();
             request.put("model", "plamo");
             JSONArray messages = new JSONArray();
-            messages.put(new JSONObject().put("role", "user").put("content", source));
+            String prompt = modelGeneration == 2
+                    ? (destination.equals("ja") ? "JA: " : "EN: ") + source
+                    : source;
+            messages.put(new JSONObject()
+                    .put("role", "user")
+                    .put("content", prompt));
             request.put("messages", messages);
             request.put("temperature", 0);
             request.put("max_tokens", MAX_OUTPUT_TOKENS);
-            request.put("stop", new JSONArray().put("<|plamo:tag|>").put("<|plamo:bos|>"));
-            byte[] body = request.toString().getBytes(StandardCharsets.UTF_8);
-            try (OutputStream output = connection.getOutputStream()) {
-                output.write(body);
+            request.put("stop", new JSONArray()
+                    .put("<|plamo:tag|>")
+                    .put("<|plamo:bos|>"));
+
+            if (modelGeneration == 3) {
+                JSONObject options = new JSONObject();
+                options.put("target_lang", destination);
+                if (sourceDirection != 0) {
+                    options.put("source_lang",
+                            destination.equals("ja") ? "en" : "ja");
+                }
+                request.put("chat_template_kwargs", options);
             }
-            int status = connection.getResponseCode();
-            InputStream stream = status >= 200 && status < 300
+
+            try (OutputStream output = connection.getOutputStream()) {
+                output.write(request.toString().getBytes(StandardCharsets.UTF_8));
+            }
+
+            int statusCode = connection.getResponseCode();
+            InputStream stream = statusCode >= 200 && statusCode < 300
                     ? connection.getInputStream() : connection.getErrorStream();
-            StringBuilder reply = new StringBuilder();
-            try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(stream, StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    reply.append(line);
+            StringBuilder response = new StringBuilder();
+            if (stream != null) {
+                try (BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) response.append(line);
                 }
             }
-            if (status < 200 || status >= 300) {
-                throw new IOException("推論HTTP " + status + "：" + reply.substring(0, Math.min(500, reply.length())));
+            if (statusCode < 200 || statusCode >= 300) {
+                throw new IOException("推論HTTP " + statusCode + "："
+                        + response.substring(0, Math.min(200, response.length())));
             }
-            JSONObject response = new JSONObject(reply.toString());
-            return response.getJSONArray("choices").getJSONObject(0)
+            return new JSONObject(response.toString())
+                    .getJSONArray("choices").getJSONObject(0)
                     .getJSONObject("message").optString("content", "");
         } finally {
+            activeRequest = null;
             connection.disconnect();
         }
     }
 
-    private void replaceSelection() {
-        if (translatedText.isEmpty()) {
+    private void pasteFromClipboard() {
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(
+                Context.CLIPBOARD_SERVICE);
+        if (clipboard == null || !clipboard.hasPrimaryClip()) {
+            toast("クリップボードにテキストがないよ");
             return;
         }
-        if (isProcessTextRequest && !isReadOnlySelection) {
-            // AndroidはRESULT_OKにEXTRA_PROCESS_TEXTを設定すると選択部分を置換する。
-            Intent reply = new Intent();
-            reply.putExtra(Intent.EXTRA_PROCESS_TEXT, translatedText);
-            setResult(RESULT_OK, reply);
-            finish();
-        } else {
-            copyTranslation();
+        ClipData clip = clipboard.getPrimaryClip();
+        if (clip == null || clip.getItemCount() == 0) return;
+        CharSequence value = clip.getItemAt(0).coerceToText(this);
+        if (value != null) {
+            sourceEdit.setText(value);
+            sourceEdit.setSelection(sourceEdit.length());
+            hideKeyboard();
+            startTranslation(true);
         }
     }
 
     private void copyTranslation() {
-        if (translatedText.isEmpty()) {
-            return;
+        if (translatedText.isEmpty()) return;
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(
+                Context.CLIPBOARD_SERVICE);
+        if (clipboard != null) {
+            clipboard.setPrimaryClip(
+                    ClipData.newPlainText("PLaMo 翻訳", translatedText));
+            toast("翻訳結果をコピーしたよ");
         }
-        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-        clipboard.setPrimaryClip(ClipData.newPlainText("PLaMo翻訳", translatedText));
-        Toast.makeText(this, "翻訳結果をコピーしたよ", Toast.LENGTH_SHORT).show();
     }
 
-    private void setStatus(String message) {
-        statusView.setText(message);
+    private void shareTranslation() {
+        if (translatedText.isEmpty()) return;
+        Intent send = new Intent(Intent.ACTION_SEND);
+        send.setType("text/plain");
+        send.putExtra(Intent.EXTRA_TEXT, translatedText);
+        startActivity(Intent.createChooser(send, "翻訳結果を共有"));
+    }
+
+    private void speakTranslation() {
+        if (translatedText.isEmpty()) return;
+        if (!ttsReady || tts == null) {
+            toast("オフライン音声エンジンを利用できない");
+            return;
+        }
+        Locale language = lastTarget.equals("ja")
+                ? Locale.JAPANESE : Locale.ENGLISH;
+
+        // Respect on-device privacy: never select a TTS voice that requires
+        // network access. Users may need to install an offline voice first.
+        android.speech.tts.Voice offline = null;
+        if (tts.getVoices() != null) {
+            for (android.speech.tts.Voice voice : tts.getVoices()) {
+                if (!voice.isNetworkConnectionRequired()
+                        && voice.getLocale().getLanguage().equals(
+                                language.getLanguage())) {
+                    offline = voice;
+                    break;
+                }
+            }
+        }
+        if (offline == null) {
+            toast("この言語のオフライン音声をAndroidの設定から追加してね");
+            return;
+        }
+        tts.setVoice(offline);
+        tts.speak(translatedText, TextToSpeech.QUEUE_FLUSH,
+                null, "plamo-translation");
+    }
+
+    private void replaceSelection() {
+        if (translatedText.isEmpty()) return;
+        if (isProcessTextRequest && !isReadOnlySelection) {
+            Intent data = new Intent();
+            data.putExtra(Intent.EXTRA_PROCESS_TEXT, translatedText);
+            setResult(RESULT_OK, data);
+            finish();
+        }
+    }
+
+    private void hideKeyboard() {
+        View focus = getCurrentFocus();
+        if (focus != null) {
+            InputMethodManager manager = (InputMethodManager)
+                    getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (manager != null) {
+                manager.hideSoftInputFromWindow(focus.getWindowToken(), 0);
+            }
+            focus.clearFocus();
+        }
+    }
+
+    private void updateActionState() {
+        if (copyAction == null) return;
+        boolean ready = !translatedText.isEmpty();
+        copyAction.setEnabled(ready);
+        shareAction.setEnabled(ready);
+        speakAction.setEnabled(ready);
+        copyAction.setAlpha(ready ? 1f : 0.35f);
+        shareAction.setAlpha(ready ? 1f : 0.35f);
+        speakAction.setAlpha(ready ? 1f : 0.35f);
+        replaceAction.setVisibility(isProcessTextRequest && !isReadOnlySelection
+                ? View.VISIBLE : View.GONE);
+        replaceAction.setEnabled(ready);
+        replaceAction.setAlpha(ready ? 1f : 0.45f);
+        translateAction.setEnabled(!changingModel);
+        translateAction.setAlpha(changingModel ? 0.5f : 1f);
+        if (modelStateText != null) {
+            boolean modelPresent = modelPath().isFile();
+            modelStateText.setText(modelPresent
+                    ? "● 端末内のみ ・ PLaMo" : "● モデル未設定");
+        }
+    }
+
+    private void setStatus(String text, boolean error) {
+        if (statusText == null || destroyed) return;
+        statusText.setText(text);
+        statusText.setTextColor(error ? 0xFFB3261E : MUTED);
+    }
+
+    private void toast(String message) {
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
+    }
+
+    // ---- Native Android UI primitives, with Material-style touch targets ----
+
+    private int dp(float value) {
+        return Math.round(getResources().getDisplayMetrics().density * value);
+    }
+
+    private LinearLayout vertical() {
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        return layout;
+    }
+
+    private LinearLayout horizontal(int gravity) {
+        LinearLayout layout = new LinearLayout(this);
+        layout.setGravity(gravity);
+        layout.setOrientation(LinearLayout.HORIZONTAL);
+        return layout;
+    }
+
+    private LinearLayout.LayoutParams fillWrap() {
+        return new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+    }
+
+    private LinearLayout.LayoutParams sized(int widthDp, int heightDp) {
+        return new LinearLayout.LayoutParams(dp(widthDp), dp(heightDp));
+    }
+
+    private LinearLayout.LayoutParams marginBottom(int bottomDp) {
+        LinearLayout.LayoutParams p = fillWrap();
+        p.bottomMargin = dp(bottomDp);
+        return p;
+    }
+
+    private LinearLayout.LayoutParams marginTop(int topDp) {
+        LinearLayout.LayoutParams p = fillWrap();
+        p.topMargin = dp(topDp);
+        return p;
+    }
+
+    private Drawable round(int color, int radiusDp, int strokeColor, int strokeDp) {
+        GradientDrawable shape = new GradientDrawable();
+        shape.setShape(GradientDrawable.RECTANGLE);
+        shape.setColor(color);
+        shape.setCornerRadius(dp(radiusDp));
+        if (strokeDp > 0) shape.setStroke(dp(strokeDp), strokeColor);
+        return shape;
+    }
+
+    private Drawable ripple(int color, int radiusDp) {
+        Drawable normal = round(color, radiusDp, color, 0);
+        return new RippleDrawable(
+                ColorStateList.valueOf(0x230B57D0), normal, null);
+    }
+
+    private TextView label(String text, int sizeSp, int color, boolean bold) {
+        TextView view = new TextView(this);
+        view.setText(text);
+        view.setTextSize(sizeSp);
+        view.setTextColor(color);
+        view.setGravity(Gravity.CENTER_VERTICAL);
+        view.setIncludeFontPadding(true);
+        if (bold) view.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        return view;
+    }
+
+    private TextView chip(String text, int foreground, int background) {
+        TextView chip = label(text, 14, foreground, true);
+        chip.setGravity(Gravity.CENTER);
+        chip.setSingleLine(true);
+        chip.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        chip.setPadding(dp(9), 0, dp(9), 0);
+        chip.setBackground(ripple(background, 18));
+        chip.setClickable(true);
+        chip.setFocusable(true);
+        return chip;
+    }
+
+    private TextView roundedButton(String text, int background,
+            int foreground, int textSizeSp) {
+        TextView button = label(text, textSizeSp, foreground, true);
+        button.setGravity(Gravity.CENTER);
+        button.setPadding(dp(10), dp(8), dp(10), dp(8));
+        button.setBackground(ripple(background, 24));
+        button.setClickable(true);
+        button.setFocusable(true);
+        return button;
+    }
+
+    private ImageButton icon(int resource, String accessibility,
+            Runnable action, int tint, int size) {
+        ImageButton button = new ImageButton(this);
+        button.setImageResource(resource);
+        button.setColorFilter(tint);
+        button.setScaleType(android.widget.ImageView.ScaleType.CENTER_INSIDE);
+        button.setPadding(dp(size >= 44 ? 11 : 9),
+                dp(size >= 44 ? 11 : 9),
+                dp(size >= 44 ? 11 : 9),
+                dp(size >= 44 ? 11 : 9));
+        button.setBackground(ripple(Color.TRANSPARENT, size / 2));
+        button.setContentDescription(accessibility);
+        button.setOnClickListener(v -> action.run());
+        return button;
     }
 
     @Override
     protected void onDestroy() {
         destroyed = true;
+        cancelPendingTranslation();
         executor.shutdownNow();
         if (boundToService) {
             unbindService(connection);
             boundToService = false;
         }
-        // Deliberately do not stop ModelService: the next popup reuses GGUF in RAM.
+        if (tts != null) {
+            tts.stop();
+            tts.shutdown();
+        }
+        // Foreground ModelService intentionally outlives this Activity.
         super.onDestroy();
     }
 }

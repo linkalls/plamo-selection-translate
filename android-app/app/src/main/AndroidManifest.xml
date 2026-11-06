@@ -20,15 +20,27 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Keep an explicitly user-started local translation model loaded in RAM for repeated text selection translation; visible notification with stop action." />
         </service>
+        <!-- Main translation workspace opens full-screen. -->
         <activity
-            android:name=".TranslateActivity"
+            android:name=".HomeActivity"
+            android:theme="@style/Theme.PLaMo.Home"
             android:exported="true"
-            android:launchMode="singleTop"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+        </activity>
+
+        <!-- The platform returns this Activity's result to selected text.
+             This is an actual themed floating Activity, not a draw-overlays
+             window, so the caller stays visible underneath. -->
+        <activity
+            android:name=".TranslateActivity"
+            android:theme="@style/Theme.PLaMo.Floating"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.PROCESS_TEXT" />
                 <category android:name="android.intent.category.DEFAULT" />

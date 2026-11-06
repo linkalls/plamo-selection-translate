@@ -129,7 +129,7 @@ public final class ModelService extends Service {
     }
 
     private Notification createNotification() {
-        Intent openIntent = new Intent(this, TranslateActivity.class);
+        Intent openIntent = new Intent(this, HomeActivity.class);
         openIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
         PendingIntent open = PendingIntent.getActivity(
                 this, 0, openIntent, PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
@@ -285,6 +285,12 @@ public final class ModelService extends Service {
         command.add("0");
         command.add("-np");
         command.add("1");
+        // PLaMo 3's GGUF includes a Jinja chat template which interprets
+        // chat_template_kwargs.target_lang. Keep legacy PLaMo 2 behavior.
+        if (getSharedPreferences("plamo_prefs", MODE_PRIVATE)
+                .getInt("plamo_generation", 3) == 3) {
+            command.add("--jinja");
+        }
         command.add("--no-prefill-assistant");
 
         ProcessBuilder builder = new ProcessBuilder(command);
