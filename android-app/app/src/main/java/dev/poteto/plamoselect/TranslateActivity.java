@@ -625,8 +625,8 @@ public class TranslateActivity extends Activity {
                                 .putInt("plamo_generation", generation).apply();
                         setStatus("翻訳形式を PLaMo " + generation + " に設定", false);
                         // The server's --jinja flag differs by model family.
-                        ModelService model = modelService;
-                        if (model != null) model.requestModelReload();
+                        ModelService currentService = modelService;
+                        if (currentService != null) currentService.requestModelReload();
                         if (!sourceEdit.getText().toString().trim().isEmpty()) {
                             startTranslation(true);
                         }
