@@ -41,7 +41,7 @@ runtime. Neither the Google Translate app nor Gboard needs to be modified.
 
 ## First run / PLaMo models
 
-1. Download **PLaMo-Select-v0.6.0-release.apk** from [Releases](../../releases)
+1. Download **PLaMo-Select-v0.7.0-release.apk** from [Releases](../../releases)
    and install it.
 2. On first launch, choose **Download** to fetch PFN's PLaMo 3 Translate 0.8B
    Q4_0 GGUF (~548 MB, official mobile-oriented quantization), or select an
@@ -99,6 +99,37 @@ The public smoke test compiles the production Java splitting class without an
 Android emulator, then passes the extracted segments of a fictional multiline
 article through the real PLaMo 3 GGUF using streaming. It verifies numerical
 facts from the headline and body survive the translation.
+
+## Smooth floating-result scrolling and device diagnosis (v0.7)
+
+The floating blue translation result card is a `PriorityScrollView`. It
+prioritizes the user's vertical swipe over the outer window's scroll when
+there is more translated content in that direction. As soon as the inner
+result reaches the edge, the outer window can scroll again. Platform Android
+`requestDisallowInterceptTouchEvent` coordinates gesture ownership.
+
+The floating preview does not enable text selection inside the nested scroller,
+because a selectable `TextView` can intercept drags for selecting text.
+Use the one-tap **Copy** action to copy the actual complete result, or
+**全文を表示** to open a dedicated full-screen reader where scrolling and text
+selection work independently of the popup. The status label displays the
+complete translated character count, not just visible preview content.
+
+Settings now include **デバイス診断・自動最適化**, which locally reports Android's
+CPU thread count, memory, OpenGL ES version, and Vulkan capability. When the
+user explicitly starts the benchmark, the service runs the *installed GGUF*
+with 2 and 4 CPU threads, performs a warmup and two timed translations per
+configuration, then applies the faster result. If results differ by less
+than 10%, it prefers two threads to reduce unnecessary power draw. This is
+only a short benchmark, not a validated prediction of performance under
+extended thermal load. Models remain local and the normal memory-resident
+server is restored after the diagnostic.
+
+**Important:** Vulkan device support only identifies hardware/API capability.
+The currently bundled official upstream Android llama.cpp binary is built
+for **CPU inference**. No GPU benchmark, Vulkan layer offloading, or GPU
+acceleration is enabled in v0.7; those require a separate GPU-enabled runtime
+and device-specific compatibility tests.
 
 ## Android build
 

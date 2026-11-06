@@ -110,6 +110,7 @@ public class TranslateActivity extends Activity {
 
     private ScrollView scrollView;
     private ScrollView resultScroller;
+    private TextView showFullResultAction;
     private LinearLayout sourceCardContainer;
     private EditText sourceEdit;
     private TextView targetText;
@@ -437,7 +438,10 @@ public class TranslateActivity extends Activity {
         targetText = label("ここに翻訳結果が表示される",
                 isHomeScreen() ? Math.max(16, resultFont) : resultFont,
                 MUTED, false);
-        targetText.setTextIsSelectable(true);
+        // Inside a nested scroller, a selectable TextView consumes drags as
+        // text-selection gestures. The popup has a dedicated Copy button and
+        // full-screen selectable reader, so let the ScrollView own swipes.
+        targetText.setTextIsSelectable(isHomeScreen());
         targetText.setGravity(Gravity.TOP | Gravity.START);
         targetText.setPadding(0, dp(isHomeScreen() ? 17 : 10),
                 0, dp(isHomeScreen() ? 18 : 10));
@@ -446,9 +450,10 @@ public class TranslateActivity extends Activity {
         } else {
             // Inner scrolling keeps copy/share/speak/replace reachable even
             // when translating a long fictional article or an entire paragraph.
-            resultScroller = new ScrollView(this);
+            resultScroller = new PriorityScrollView(this);
             resultScroller.setFillViewport(false);
             resultScroller.setVerticalScrollBarEnabled(true);
+            resultScroller.setScrollbarFadingEnabled(false);
             resultScroller.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
             resultScroller.addView(targetText, fillWrap());
             LinearLayout.LayoutParams scrollingParams = fillWrap();
@@ -456,10 +461,23 @@ public class TranslateActivity extends Activity {
             // whole popup for a translated headline.
             scrollingParams.height = dp(96);
             translatedCard.addView(resultScroller, scrollingParams);
+            targetText.setOnLongClickListener(v -> {
+                copyTranslation();
+                return true;
+            });
         }
 
         statusText = label("端末内で翻訳・通信不要", 11, MUTED, false);
         translatedCard.addView(statusText, marginBottom(7));
+
+        if (!isHomeScreen()) {
+            showFullResultAction = label("全文を表示 ↗", 14, BLUE, true);
+            showFullResultAction.setPadding(dp(5), dp(9), dp(5), dp(12));
+            showFullResultAction.setContentDescription(
+                    "表示領域に収まりきらない翻訳を全画面で読む");
+            showFullResultAction.setOnClickListener(v -> openCompleteResult());
+            translatedCard.addView(showFullResultAction);
+        }
 
         resultActionRow = horizontal(Gravity.CENTER_VERTICAL);
         copyAction = icon(R.drawable.ic_plamo_copy,
@@ -1001,6 +1019,7 @@ public class TranslateActivity extends Activity {
         lastTarget = destination;
         translatedText = "";
         displayTranslation("翻訳中…", MUTED);
+        if (resultScroller != null) resultScroller.scrollTo(0, 0);
         setStatus("モデルを準備中…", false);
         progress.setVisibility(View.VISIBLE);
         updateActionState();
@@ -1071,7 +1090,9 @@ public class TranslateActivity extends Activity {
                     displayTranslation(translatedText, INK);
                     long elapsed = android.os.SystemClock.elapsedRealtime() - startedAt;
                     setStatus(String.format(java.util.Locale.JAPAN,
-                            "オフライン翻訳完了 · %.1f秒", elapsed / 1000.0), false);
+                            "翻訳完了 · 全文%d文字 · %.1f秒",
+                            translatedText.codePointCount(0, translatedText.length()),
+                            elapsed / 1000.0), false);
                     updateActionState();
                 });
             } catch (Exception error) {
@@ -1305,6 +1326,25 @@ public class TranslateActivity extends Activity {
         }
     }
 
+    /**
+     * Unlike the clipped blue preview, the full-screen reader exposes all
+     * generated text. Open it without making another model request.
+     */
+    private void openCompleteResult() {
+        String full = translatedText;
+        if (full.isEmpty()) {
+            full = targetText.getText().toString();
+        }
+        if (full.trim().isEmpty() || "翻訳中…".equals(full)
+                || "翻訳を準備中…".equals(full)) {
+            toast("翻訳結果がまだないよ");
+            return;
+        }
+        Intent intent = new Intent(this, ResultActivity.class);
+        intent.putExtra(ResultActivity.EXTRA_TRANSLATED_TEXT, full);
+        startActivity(intent);
+    }
+
     private void copyTranslation() {
         if (translatedText.isEmpty()) return;
         ClipboardManager clipboard = (ClipboardManager) getSystemService(
@@ -1381,6 +1421,10 @@ public class TranslateActivity extends Activity {
         if (copyAction == null) return;
         boolean ready = !translatedText.isEmpty();
         copyAction.setEnabled(ready);
+        if (showFullResultAction != null) {
+            showFullResultAction.setEnabled(ready);
+            showFullResultAction.setAlpha(ready ? 1f : 0.45f);
+        }
         shareAction.setEnabled(ready);
         speakAction.setEnabled(ready);
         copyAction.setAlpha(ready ? 1f : 0.35f);

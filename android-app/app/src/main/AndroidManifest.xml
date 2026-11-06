@@ -21,6 +21,15 @@
                 android:value="Keep an explicitly user-started local translation model loaded in RAM for repeated text selection translation; visible notification with stop action." />
         </service>
         <activity
+            android:name=".DeviceDiagnosticsActivity"
+            android:theme="@style/Theme.PLaMo.Home"
+            android:exported="false" />
+        <activity
+            android:name=".ResultActivity"
+            android:theme="@style/Theme.PLaMo.Home"
+            android:exported="false" />
+
+        <activity
             android:name=".SettingsActivity"
             android:theme="@style/Theme.PLaMo.Home"
             android:exported="false"

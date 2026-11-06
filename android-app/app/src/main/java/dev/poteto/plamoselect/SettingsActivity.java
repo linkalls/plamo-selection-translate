@@ -126,6 +126,9 @@ public final class SettingsActivity extends Activity {
                         .setNegativeButton("キャンセル", null).show());
 
         addSection("推論・パフォーマンス");
+        addRow("デバイス診断・自動最適化",
+                "CPU / メモリ / Vulkan対応を確認し、実モデルで2・4スレッドを比較",
+                () -> startActivity(new Intent(this, DeviceDiagnosticsActivity.class)));
         addChoice("CPUスレッド", "cpu_threads",
                 new String[]{"2スレッド（発熱を抑える）",
                         "4スレッド（標準）"},
