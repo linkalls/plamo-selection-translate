@@ -33,9 +33,6 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Configure Android SDK tools
-        uses: android-actions/setup-android@v3
-
       - name: Ensure Android 36 SDK and build tools
         shell: bash
         run: |
@@ -83,13 +80,24 @@ jobs:
           PLAMO_STORE_PASSWORD: ${{ secrets.PLAMO_STORE_PASSWORD }}
         run: |
           set -euo pipefail
-          if [[ -z "$PLAMO_KEYSTORE_B64" || -z "$PLAMO_STORE_PASSWORD" ]]; then
-            echo "::error::Release signing secrets are missing."
-            exit 1
-          fi
           mkdir -p dist
-          printf '%s' "$PLAMO_KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/plamo-release.p12"
-          chmod 600 "$RUNNER_TEMP/plamo-release.p12"
+          if [[ -n "$PLAMO_KEYSTORE_B64" && -n "$PLAMO_STORE_PASSWORD" ]]; then
+            printf '%s' "$PLAMO_KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/plamo-release.p12"
+            chmod 600 "$RUNNER_TEMP/plamo-release.p12"
+            echo "Using persistent release signing key from GitHub Actions secrets."
+          else
+            # This still produces a signed release (not a debug APK), but
+            # its new certificate cannot be reused for app upgrades.
+            echo "::warning::No signing secrets configured: generating a one-time release key. Future updates may require uninstall/reinstall."
+            PLAMO_STORE_PASSWORD="$(openssl rand -hex 32)"
+            export PLAMO_STORE_PASSWORD
+            keytool -genkeypair -noprompt -keyalg RSA -keysize 3072 -validity 3650 \
+              -storetype PKCS12 -keystore "$RUNNER_TEMP/plamo-release.p12" \
+              -storepass "$PLAMO_STORE_PASSWORD" -keypass "$PLAMO_STORE_PASSWORD" \
+              -alias plamo-release \
+              -dname "CN=PLaMo Select Translation, O=poteto, C=JP"
+            echo "EPHEMERAL_SIGNING=true" >> "$GITHUB_ENV"
+          fi
           build_tools="$ANDROID_HOME/build-tools/36.0.0"
           unsigned="android-app/app/build/outputs/apk/release/app-release-unsigned.apk"
           aligned="$RUNNER_TEMP/plamo-release-aligned.apk"
@@ -127,5 +135,5 @@ jobs:
           else
             gh release create "$tag" "$file" \
               --title "PLaMo Select v0.1.0 (signed release APK)" \
-              --notes "Signed production release APK, built by public GitHub Actions. Android 8+ / ARM64. PLaMo GGUF model is not included and must be imported after installation. Offline inference uses the official ggml-org/llama.cpp b12138 Android ARM64 runtime."
+              --notes "Signed non-debug release APK, built by public GitHub Actions. Signing is one-time until persistent repository signing secrets are configured; app updates may require reinstall. Android 8+ / ARM64. PLaMo GGUF model is not included and must be imported after installation. Offline inference uses the official ggml-org/llama.cpp b12138 Android ARM64 runtime."
           fi

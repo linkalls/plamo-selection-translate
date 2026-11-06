@@ -38,7 +38,7 @@ public GitHub Release asset.
 
 Signing credentials are private GitHub Actions repository secrets:
 PLAMO_KEYSTORE_B64 and PLAMO_STORE_PASSWORD.
-The same certificate must be retained for future Android in-place upgrades.
+If neither secret is available, CI uses a one-time generated key; Android updates may then require uninstall/reinstall. The same permanent certificate must be retained for in-place upgrades.
 Never put keys, passwords, private models, or credentials in Git.
 
 ## Privacy and third-party notices
