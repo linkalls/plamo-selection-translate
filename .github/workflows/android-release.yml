@@ -87,27 +87,19 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          if [[ -n "$PLAMO_KEYSTORE_B64" && -n "$PLAMO_STORE_PASSWORD" ]]; then
-            printf '%s' "$PLAMO_KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/plamo-release.p12"
-            chmod 600 "$RUNNER_TEMP/plamo-release.p12"
-            echo "Using persistent release signing key from GitHub Actions secrets."
-          else
-            # This still produces a signed release (not a debug APK), but
-            # its new certificate cannot be reused for app upgrades.
-            echo "::warning::No signing secrets configured: generating a one-time release key. Future updates may require uninstall/reinstall."
-            PLAMO_STORE_PASSWORD="$(openssl rand -hex 32)"
-            export PLAMO_STORE_PASSWORD
-            keytool -genkeypair -noprompt -keyalg RSA -keysize 3072 -validity 3650 \
-              -storetype PKCS12 -keystore "$RUNNER_TEMP/plamo-release.p12" \
-              -storepass "$PLAMO_STORE_PASSWORD" -keypass "$PLAMO_STORE_PASSWORD" \
-              -alias plamo-release \
-              -dname "CN=PLaMo Select Translation, O=poteto, C=JP"
-            echo "EPHEMERAL_SIGNING=true" >> "$GITHUB_ENV"
+          # Never silently rotate the Android app signing identity.
+          # A missing secret must fail CI instead of making a one-time key.
+          if [[ -z "$PLAMO_KEYSTORE_B64" || -z "$PLAMO_STORE_PASSWORD" ]]; then
+            echo "::error::Persistent APK signing secrets are missing. Refusing to generate an ephemeral signing key."
+            exit 1
           fi
+          printf '%s' "$PLAMO_KEYSTORE_B64" | base64 --decode > "$RUNNER_TEMP/plamo-release.p12"
+          chmod 600 "$RUNNER_TEMP/plamo-release.p12"
+          echo "Using the registered persistent PLaMo release signing certificate."
           build_tools="$ANDROID_HOME/build-tools/36.0.0"
           unsigned="android-app/app/build/outputs/apk/release/app-release-unsigned.apk"
           aligned="$RUNNER_TEMP/plamo-release-aligned.apk"
-          final="dist/PLaMo-Select-v0.7.0-release.apk"
+          final="dist/PLaMo-Select-v0.8.0-release.apk"
           "$build_tools/zipalign" -p -f 4 "$unsigned" "$aligned"
           "$build_tools/apksigner" sign \
             --ks "$RUNNER_TEMP/plamo-release.p12" \
@@ -117,13 +109,24 @@ jobs:
             --out "$final" "$aligned"
           "$build_tools/zipalign" -c -v 4 "$final"
           "$build_tools/apksigner" verify --verbose --print-certs "$final"
+          # Pin the public certificate fingerprint. A different key is a hard
+          # failure, even if someone accidentally replaces the Actions secret.
+          expected_cert="79d5c66d70b220859285137ee94d4bd44865c6a2519820df289b92214f70425b"
+          actual_cert="$("$build_tools/apksigner" verify --print-certs "$final" \
+            | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' \
+            | tr '[:upper:]' '[:lower:]')"
+          if [[ "$actual_cert" != "$expected_cert" ]]; then
+            echo "::error::APK signing certificate differs from the pinned release certificate."
+            exit 1
+          fi
+          echo "Stable release signing certificate verified: $actual_cert"
           sha256sum "$final"
 
       - name: Upload signed APK as GitHub Actions artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PLaMo-Select-v0.7.0-release
-          path: dist/PLaMo-Select-v0.7.0-release.apk
+          name: PLaMo-Select-v0.8.0-release
+          path: dist/PLaMo-Select-v0.8.0-release.apk
           if-no-files-found: error
           retention-days: 30
 
@@ -134,12 +137,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag="v0.7.0"
-          file="dist/PLaMo-Select-v0.7.0-release.apk"
+          tag="v0.8.0"
+          file="dist/PLaMo-Select-v0.8.0-release.apk"
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" "$file" --clobber
           else
             gh release create "$tag" "$file" \
-              --title "PLaMo Select v0.7.0 (signed release APK)" \
-              --notes "v0.7.0: Fix nested scrolling and text-selection gesture conflicts in the floating result card. Add full-result reader and on-device CPU 2-vs-4 thread benchmarking with honest GPU capability detection. Preserve sentence-based long-article translation and persistent model. Signed non-debug release APK, built by public GitHub Actions. Signing is one-time until persistent repository signing secrets are configured; app updates may require reinstall. Android 8+ / ARM64. PLaMo GGUF model is not included and must be imported after installation. Offline inference uses the official ggml-org/llama.cpp b12138 Android ARM64 runtime."
+              --title "PLaMo Select v0.8.0 (signed release APK)" \
+              --notes "v0.8.0: Use a persistent production signing key via private GitHub Actions secrets and verify the pinned certificate fingerprint. Preserve the paragraph-context translation update and all previous app features. Android in-place upgrades are supported for future builds signed with this certificate. Older ephemeral-key APKs are not signature-compatible. Android 8+ / ARM64. PLaMo GGUF model is not included and must be imported after installation. Offline inference uses the official ggml-org/llama.cpp b12138 Android ARM64 runtime."
           fi

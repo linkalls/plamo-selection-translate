@@ -41,7 +41,7 @@ runtime. Neither the Google Translate app nor Gboard needs to be modified.
 
 ## First run / PLaMo models
 
-1. Download **PLaMo-Select-v0.7.0-release.apk** from [Releases](../../releases)
+1. Download **PLaMo-Select-v0.8.0-release.apk** from [Releases](../../releases)
    and install it.
 2. On first launch, choose **Download** to fetch PFN's PLaMo 3 Translate 0.8B
    Q4_0 GGUF (~548 MB, official mobile-oriented quantization), or select an
@@ -143,12 +143,18 @@ GitHub Release download.
 
 ### Signing and upgrades
 
-GitHub secrets PLAMO_KEYSTORE_B64 and PLAMO_STORE_PASSWORD enable persistent
-release signing. Without them, CI creates an **ephemeral non-debug release
-certificate**. This is a signed release build but cannot guarantee in-place
-upgrades from versions signed by different ephemeral keys. Keep a separate
-copy of GGUF files before uninstalling an old version, as Android deletes app
-private storage upon uninstall.
+GitHub secrets `PLAMO_KEYSTORE_B64` and `PLAMO_STORE_PASSWORD` are mandatory
+for persistent release signing. CI **fails closed** rather than generating a
+new signing certificate. The public fingerprint is pinned and verified on
+every signed APK:
+
+`79:D5:C6:6D:70:B2:20:85:92:85:13:7E:E9:4D:4B:D4:48:65:C6:A2:51:98:20:DF:28:9B:92:21:4F:70:42:5B`
+
+Release v0.8.0 is the first version signed with this fixed certificate.
+Future releases with the same key can be installed as Android updates.
+Earlier builds used temporary certificates and cannot be upgraded in place.
+Keep a separate copy of GGUF files before uninstalling an old version, as
+Android deletes app private storage when uninstalling.
 
 ## Permissions and privacy
 
