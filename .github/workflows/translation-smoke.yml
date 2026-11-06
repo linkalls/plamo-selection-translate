@@ -1,0 +1,67 @@
+name: PLaMo 3 real-model translation smoke test
+
+# Runs on demand, not during every APK build: downloads 573 MB to an ephemeral
+# GitHub Actions runner, not to the user's storage or the public repository.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pfml3-translation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download official llama.cpp Ubuntu CPU release
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/plamo-smoke"
+          curl -fL --retry 3             -o "$RUNNER_TEMP/plamo-smoke/llama.tar.gz"             "https://github.com/ggml-org/llama.cpp/releases/download/b12138/llama-b12138-bin-ubuntu-x64.tar.gz"
+          tar -xzf "$RUNNER_TEMP/plamo-smoke/llama.tar.gz" -C "$RUNNER_TEMP/plamo-smoke"
+          find "$RUNNER_TEMP/plamo-smoke" -name llama-server -type f
+
+      - name: Download official PLaMo 3 0.8B quantized model
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 --connect-timeout 30 --max-time 400             -o "$RUNNER_TEMP/plamo-smoke/model.gguf"             "https://huggingface.co/pfnet/plamo-3-translate-0.8b-GGUF/resolve/main/plamo-3-translate-0.8b-Q4_K_M.gguf?download=true"
+          test "$(stat -c%s "$RUNNER_TEMP/plamo-smoke/model.gguf")" -gt 500000000
+          test "$(head -c4 "$RUNNER_TEMP/plamo-smoke/model.gguf")" = "GGUF"
+
+      - name: Start the local PLaMo model server
+        shell: bash
+        run: |
+          set -euo pipefail
+          server="$(find "$RUNNER_TEMP/plamo-smoke" -name llama-server -type f | head -1)"
+          test -x "$server"
+          libdir="$(dirname "$server")"
+          (
+            cd "$libdir"
+            LD_LIBRARY_PATH="$libdir" "$server"               -m "$RUNNER_TEMP/plamo-smoke/model.gguf"               --alias plamo --host 127.0.0.1 --port 8765               -c 4096 -t 4 -ngl 0 -np 1 --jinja --no-prefill-assistant               > "$RUNNER_TEMP/plamo-smoke/server.log" 2>&1
+          ) &
+          echo "$!" > "$RUNNER_TEMP/plamo-smoke/server.pid"
+
+      - name: Translate English, Japanese, and auto-detected source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/smoke_pfml3.py
+
+      - name: Show model server logs on error
+        if: failure()
+        run: |
+          tail -n 120 "$RUNNER_TEMP/plamo-smoke/server.log" || true
+
+      - name: Clean up the local server and model
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f "$RUNNER_TEMP/plamo-smoke/server.pid" ]]; then
+            kill "$(cat "$RUNNER_TEMP/plamo-smoke/server.pid")" 2>/dev/null || true
+          fi
+          rm -f "$RUNNER_TEMP/plamo-smoke/model.gguf"
